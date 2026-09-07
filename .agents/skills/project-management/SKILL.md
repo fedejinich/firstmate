@@ -33,6 +33,24 @@ Resolve the project name, destination, delivery posture, and autonomy posture be
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
+## Confirmed requester outcomes
+
+A confirmed registration request carrying both `[registration-request=<id>]` and `[request-digest=<sha256>]` opts into the durable result owned by [`bin/fm-project-registration-outcome.sh`](../../../bin/fm-project-registration-outcome.sh).
+The script header and `--help` own its exact request digest, record schema, path, state machine, publication, validation, idempotency, and retention contract.
+Requests without both markers keep the ordinary project-management path and create no outcome directory or record.
+
+For an opted-in request, invoke the helper's `begin` command with the exact confirmed fields before any authentication check or project mutation.
+Only a `created` result authorizes the ordinary add procedure to proceed.
+An `existing pending` or `existing indeterminate` result means an earlier attempt may have changed something, so inspect the registry, destination, origin, posture, and initialization without replaying a clone or registry write, then record the result that can now be proven.
+An existing settled result ends the retry without another project operation.
+A reused request ID with a different binding is a conflict, not a new request.
+
+After the existing procedure, use the helper to record authentication failure separately from a destination conflict, second-mate route, or policy rejection.
+Record an indeterminate result when completion cannot be proven.
+Use its success outcome only after the helper's own checks observe the requested registry entry, exact destination repository and origin, posture, autonomy, and required no-mistakes initialization.
+The helper retains every result without automatic expiry, and the TUI never invokes retirement.
+Firstmate may retire only a bound settled result after the captain-visible result no longer needs to be retained.
+
 ## Delivery posture
 
 The registry records the project's standing posture, which is the captain's default for the work rather than any task's answer; `AGENTS.md` section 7 owns how each task's concrete mode and yolo are resolved at intake and passed explicitly to the brief, the spawn, and any promotion.

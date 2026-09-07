@@ -1,0 +1,8 @@
+{
+  "schema": "fm-project-registration-outcome.v1",
+  "request_id": "6bd49c90b0d7f4f0d0e5118659337df6",
+  "request_digest": "6bd49c90b0d7f4f0d0e5118659337df69323bbbf85a9838b6f9811c37d6fdae7",
+  "project": "monobox",
+  "outcome": "authentication-failure",
+  "reason": "authentication-required"
+}
