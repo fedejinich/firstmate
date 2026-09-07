@@ -115,10 +115,8 @@ run_finish "$fixture_home" "$FIXTURE_ID" "$FIXTURE_DIGEST" \
   "${FIXTURE_ARGS[@]}" --outcome authentication-failure >/dev/null \
   || fail "fixture authentication outcome failed"
 record="$fixture_home/state/project-registration-outcomes/$FIXTURE_ID.json"
-jq -S . "$record" > "$TMP_ROOT/fixture.actual"
-jq -S . "$FIXTURE" > "$TMP_ROOT/fixture.expected"
-cmp -s "$TMP_ROOT/fixture.actual" "$TMP_ROOT/fixture.expected" \
-  || fail "published record does not match the consumer fixture"
+cmp -s "$record" "$FIXTURE" \
+  || fail "published bytes differ from the pinned TUI correction 447ea08 fixture"
 inspected=$(run_inspect "$fixture_home" "$FIXTURE_ID" "$FIXTURE_DIGEST") \
   || fail "public inspect rejected the consumer fixture"
 printf '%s' "$inspected" | jq -e '
@@ -279,6 +277,27 @@ out=$(run_begin "$success_home" "$SUCCESS_ID" "$SUCCESS_DIGEST" "${SUCCESS_ARGS[
 [ "$out" = 'existing success' ] || fail "settled duplicate did not stop replay: $out"
 pass "success requires the exact registry, clone, origin, posture, and healthy initialization"
 
+POSTURE_ARGS=(--project app --source-url "$TMP_ROOT/right-source.git" --posture no-mistakes --autonomous-merge off)
+POSTURE_DIGEST=$(digest "${POSTURE_ARGS[@]}") || fail "posture digest failed"
+POSTURE_ID=$(request_id "$POSTURE_DIGEST")
+run_begin "$success_home" "$POSTURE_ID" "$POSTURE_DIGEST" "${POSTURE_ARGS[@]}" >/dev/null \
+  || fail "posture begin failed"
+posture_record="$success_home/state/project-registration-outcomes/$POSTURE_ID.json"
+cp "$posture_record" "$TMP_ROOT/posture.pending"
+for annotation in '[typo]' '[no-mistakes typo]' '[no-mistakes' '[+yolo]' 'garbage'; do
+  printf '%s\n' "- app $annotation - The app project. (added 2026-09-06)" > "$success_home/data/projects.md"
+  expect_failure "invalid posture $annotation" env PATH="$doctor_fake:$PATH" FM_HOME="$success_home" \
+    "$SCRIPT" finish --request-id "$POSTURE_ID" --request-digest "$POSTURE_DIGEST" \
+    "${POSTURE_ARGS[@]}" --outcome success
+  cmp -s "$posture_record" "$TMP_ROOT/posture.pending" || fail "invalid annotation changed the outcome"
+done
+printf '%s\n' '- app - The app project. (added 2026-09-06)' > "$success_home/data/projects.md"
+PATH="$doctor_fake:$PATH" run_finish "$success_home" "$POSTURE_ID" "$POSTURE_DIGEST" \
+  "${POSTURE_ARGS[@]}" --outcome success >/dev/null || fail "legacy registered posture was refused"
+run_inspect "$success_home" "$POSTURE_ID" "$POSTURE_DIGEST" | jq -e '.outcome == "success"' \
+  >/dev/null || fail "legacy registered posture did not reach success"
+pass "invalid posture annotations fail closed while legacy registration succeeds"
+
 # Known failures and an unknown completion remain distinct, and settled verdicts
 # cannot be rewritten by a retry.
 outcome_home="$TMP_ROOT/outcome-home"
@@ -366,6 +385,20 @@ MALFORMED_ID=$(request_id "$BASE_DIGEST")
 run_begin "$malformed_home" "$MALFORMED_ID" "$BASE_DIGEST" "${BASE_ARGS[@]}" >/dev/null \
   || fail "malformed fixture begin failed"
 malformed_record="$malformed_home/state/project-registration-outcomes/$MALFORMED_ID.json"
+cp "$malformed_record" "$TMP_ROOT/valid-record.json"
+for shape in secret-first secret-last duplicate empty array; do
+  case "$shape" in
+    secret-first) printf '%s\n' '{"credential":"secret"}' > "$malformed_record"; cat "$TMP_ROOT/valid-record.json" >> "$malformed_record" ;;
+    secret-last) cat "$TMP_ROOT/valid-record.json" > "$malformed_record"; printf '%s\n' '{"credential":"secret"}' >> "$malformed_record" ;;
+    duplicate) cat "$TMP_ROOT/valid-record.json" "$TMP_ROOT/valid-record.json" > "$malformed_record" ;;
+    empty) : > "$malformed_record" ;;
+    array) jq -s . "$TMP_ROOT/valid-record.json" > "$malformed_record" ;;
+  esac
+  expect_failure "$shape record inspect" run_inspect "$malformed_home" "$MALFORMED_ID" "$BASE_DIGEST"
+  [ ! -s "$TMP_ROOT/failure.out" ] || fail "$shape inspect exposed unvalidated data"
+  assert_no_grep secret "$TMP_ROOT/failure.err" "$shape inspect leaked a credential"
+  expect_failure "$shape record retry" run_begin "$malformed_home" "$MALFORMED_ID" "$BASE_DIGEST" "${BASE_ARGS[@]}"
+done
 printf '%s\n' '{"schema":"wrong"}' > "$malformed_record"
 chmod 600 "$malformed_record"
 expect_failure "malformed record inspect" run_inspect \

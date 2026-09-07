@@ -273,7 +273,9 @@ reason_pair_valid() {
 record_valid() {
   local path=$1
   private_file_valid "$path" || return 1
-  jq -e --arg schema "$OUTCOME_SCHEMA" '
+  VALIDATED_RECORD=$(jq -ces --arg schema "$OUTCOME_SCHEMA" '
+    if length == 1 then .[0] else error("expected one record") end
+    | select(
     type == "object"
     and (keys == ["outcome", "project", "reason", "request_digest", "request_id", "schema"])
     and .schema == $schema
@@ -289,7 +291,8 @@ record_valid() {
       or (.outcome == "rejected" and (.reason == "destination-conflict" or .reason == "secondmate-owned" or .reason == "policy-rejected"))
       or (.outcome == "indeterminate" and .reason == "completion-unproven")
     )
-  ' "$path" >/dev/null 2>&1
+    )
+  ' "$path" 2>/dev/null)
 }
 
 record_binding_matches() {
@@ -298,7 +301,7 @@ record_binding_matches() {
     --arg request_digest "$REQUEST_DIGEST" \
     --arg project "$PROJECT" \
     '.request_id == $request_id and .request_digest == $request_digest and .project == $project' \
-    "$1" >/dev/null 2>&1
+    <<< "$VALIDATED_RECORD" >/dev/null 2>&1
 }
 
 inspect_binding_matches() {
@@ -306,7 +309,7 @@ inspect_binding_matches() {
     --arg request_id "$REQUEST_ID" \
     --arg request_digest "$REQUEST_DIGEST" \
     '.request_id == $request_id and .request_digest == $request_digest' \
-    "$1" >/dev/null 2>&1
+    <<< "$VALIDATED_RECORD" >/dev/null 2>&1
 }
 
 publish_record() {
@@ -345,6 +348,13 @@ verify_success() {
     || die "success is unproven: the project registry is unavailable"
   record_line=$(registry_line) \
     || die "success is unproven: the registry does not contain exactly one matching project"
+
+  printf '%s\n' "$record_line" | awk '
+    $3 == "-" { exit 0 }
+    $3 ~ /^\[(no-mistakes|direct-PR|local-only|no-mistakes-prod-only)\]$/ && $4 == "-" { exit 0 }
+    $3 ~ /^\[(no-mistakes|direct-PR|local-only|no-mistakes-prod-only)$/ && $4 == "+yolo]" && $5 == "-" { exit 0 }
+    { exit 1 }
+  ' || die "success is unproven: the registered posture annotation is invalid"
 
   wanted_yolo=$AUTONOMOUS_MERGE
   mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
@@ -487,9 +497,9 @@ case "$COMMAND" in
 
     if [ -e "$RECORD" ] || [ -L "$RECORD" ]; then
       record_valid "$RECORD" || die "existing outcome record is unsafe or malformed"
-      record_binding_matches "$RECORD" || die "request ID is already bound to another registration"
-      EXISTING_OUTCOME=$(jq -r '.outcome' "$RECORD")
-      EXISTING_REASON=$(jq -r '.reason' "$RECORD")
+      record_binding_matches || die "request ID is already bound to another registration"
+      EXISTING_OUTCOME=$(jq -r '.outcome' <<< "$VALIDATED_RECORD")
+      EXISTING_REASON=$(jq -r '.reason' <<< "$VALIDATED_RECORD")
       if [ "$COMMAND" = begin ]; then
         printf 'existing %s\n' "$EXISTING_OUTCOME"
         exit 0
@@ -537,8 +547,8 @@ case "$COMMAND" in
     if [ "$COMMAND" = inspect ]; then
       [ -e "$RECORD" ] || [ -L "$RECORD" ] || exit 3
       record_valid "$RECORD" || die "outcome record is unsafe or malformed"
-      inspect_binding_matches "$RECORD" || die "outcome record does not match the requested identity"
-      jq -c . "$RECORD"
+      inspect_binding_matches || die "outcome record does not match the requested identity"
+      printf '%s\n' "$VALIDATED_RECORD"
       exit 0
     fi
 
@@ -547,8 +557,8 @@ case "$COMMAND" in
     fm_lock_acquire_wait "$LOCK_PATH" || die "cannot lock the request outcome"
     [ -e "$RECORD" ] || [ -L "$RECORD" ] || { printf 'absent\n'; exit 0; }
     record_valid "$RECORD" || die "outcome record is unsafe or malformed"
-    inspect_binding_matches "$RECORD" || die "outcome record does not match the requested identity"
-    EXISTING_OUTCOME=$(jq -r '.outcome' "$RECORD")
+    inspect_binding_matches || die "outcome record does not match the requested identity"
+    EXISTING_OUTCOME=$(jq -r '.outcome' <<< "$VALIDATED_RECORD")
     case "$EXISTING_OUTCOME" in
       pending|indeterminate) die "unsettled outcome cannot be retired" ;;
       success|authentication-failure|rejected) ;;
