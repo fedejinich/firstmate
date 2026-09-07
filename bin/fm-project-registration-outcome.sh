@@ -51,14 +51,21 @@
 # A matching duplicate `begin` prints `existing <outcome>` and never authorizes
 # the registration procedure to run again. Reconcile an existing pending or
 # indeterminate request from disk; do not clone, overwrite, or append a registry
-# row again. `finish success` independently observes the exact registry posture,
-# destination repository and requested origin, and required no-mistakes doctor
-# result before publishing success. Missing proof leaves the prior record intact.
+# row again. Before publishing a new success, `finish` requires exactly one
+# matching registry entry with a valid posture annotation (or the supported
+# unannotated legacy format), the requested posture and autonomy, the description
+# when supplied, the destination repository root and requested origin, and a
+# healthy no-mistakes doctor result when the posture requires initialization.
+# The observed_path is request-binding context, not a destination override;
+# verification uses $FM_HOME/projects/<project> or $FM_PROJECTS_OVERRIDE/<project>.
+# Missing proof leaves the prior record intact; an identical settled retry
+# returns the existing result without rechecking the project.
 #
 # Retention and cleanup are Firstmate-owned. There is no automatic expiry, so a
 # refresh or dead requester cannot remove the result. `retire` requires the exact
 # request binding and refuses pending or indeterminate records. Firstmate may use
 # it only after the captain-visible settled result no longer needs to be retained.
+# Outcome operations emit no generic wake events.
 #
 # Usage:
 #   fm-project-registration-outcome.sh digest REQUEST_OPTIONS
@@ -71,8 +78,10 @@
 #   --project NAME --posture POSTURE --autonomous-merge on|off
 #   [--source-url URL] [--observed-path ABSOLUTE_PATH] [--description ONE_LINE]
 #
-# `inspect` prints the validated compact JSON record. It exits 3, silently, when
-# no record exists. Every other refusal exits nonzero with a secret-free reason.
+# `inspect` accepts exactly one JSON object and prints that validated object as
+# compact JSON; streams of multiple objects are refused without exposing them.
+# It exits 3, silently, when no record exists.
+# Every other refusal exits nonzero with a secret-free reason.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

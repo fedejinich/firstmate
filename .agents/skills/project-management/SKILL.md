@@ -41,15 +41,8 @@ Requests without both markers keep the ordinary project-management path and crea
 
 For an opted-in request, invoke the helper's `begin` command with the exact confirmed fields before any authentication check or project mutation.
 Only a `created` result authorizes the ordinary add procedure to proceed.
-An `existing pending` or `existing indeterminate` result means an earlier attempt may have changed something, so inspect the registry, destination, origin, posture, and initialization without replaying a clone or registry write, then record the result that can now be proven.
-An existing settled result ends the retry without another project operation.
-A reused request ID with a different binding is a conflict, not a new request.
-
-After the existing procedure, use the helper to record authentication failure separately from a destination conflict, second-mate route, or policy rejection.
-Record an indeterminate result when completion cannot be proven.
-Use its success outcome only after the helper's own checks observe the requested registry entry, exact destination repository and origin, posture, autonomy, and required no-mistakes initialization.
-The helper retains every result without automatic expiry, and the TUI never invokes retirement.
-Firstmate may retire only a bound settled result after the captain-visible result no longer needs to be retained.
+Follow the producer header's retry and reconciliation contract for every other result, and its outcome meanings when finishing the procedure.
+The TUI remains a requester and read-only observer; Firstmate owns registration mutations and outcome retirement.
 
 ## Delivery posture
 
