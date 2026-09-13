@@ -168,7 +168,15 @@ class Broker:
         row = self.db.execute("SELECT 1 FROM receipts WHERE id=?", (submission,)).fetchone()
         if not row:
             attempt = self.state / "inbox" / (".explorer-" + submission + ".attempt")
-            status = "unknown_acknowledgement" if attempt.exists() or attempt.is_symlink() else "known_non_delivery"
+            note = self.state / "inbox" / ("explorer-" + submission + ".note")
+            handled = note.parent / "handled" / note.name
+            if any(path.exists() or path.is_symlink() for path in (attempt, note, handled)):
+                return self.response("unknown_acknowledgement", submission=submission)
+            try:
+                receipt = json.loads(run(str(ROOT / "fm-inbox.sh"), "receipt", submission, env=self.env))
+                status = "known_non_delivery" if receipt["status"] == "unknown_acknowledgement" else "unknown_acknowledgement"
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                status = "unknown_acknowledgement"
             return self.response(status, submission=submission)
         status = "unknown_acknowledgement"
         # Locate only our exact body through the inbox owner's receipt interface.
@@ -224,6 +232,10 @@ class Broker:
         old = self.db.execute("SELECT body FROM receipts WHERE id=?", (sid,)).fetchone()
         if old:
             return self.response("duplicate_delivery" if old[0] == body else "submission_mismatch", submission=sid)
+        # A lost ledger row does not erase surviving inbox evidence or authorize retry.
+        prior = self.reconcile(sid)
+        if prior["status"] != "known_non_delivery":
+            return prior
         # Record intent BEFORE any side effect. Never execute a repeated submission.
         try:
             self.db.execute("INSERT INTO receipts VALUES (?,?)", (sid, body))

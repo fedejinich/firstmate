@@ -6,7 +6,8 @@ This release supplies feedback delivery to the selected supervisor, not a transc
 
 ## Start and handoff
 
-The supervisor starts the adapter from its own process ancestry, with its current home, a recorded task, an existing artifact version, and the approved Explorer main-process PID.
+The supervisor starts the adapter from its verified session-lock ancestry, with its current home, a recorded task, an existing artifact version, and the approved Explorer main-process PID.
+The adapter uses Firstmate's existing session-lock proof and exact task-endpoint validation, and requires the recorded endpoint to remain live before discovery, connection or submission.
 Use `python3 bin/fm-explorer-session.py --help` for launch arguments.
 `--launch` returns after the socket and grant exist; without it the service remains in the foreground.
 The directory argument must name a new directory beneath an operator-controlled parent.
@@ -85,13 +86,15 @@ The following statuses describe delivery, independently of a returned artifact r
 - `queued`: the durable inbox note exists; the supervisor has not acknowledged it.
 - `delivered`: the supervisor moved that note to the inbox owner's `handled/` location, meaning it consumed the feedback, not that it executed a request or produced a revision.
 - `unknown_acknowledgement`: an attempt was recorded but no authoritative note/acknowledgement is currently available, or the receipt query failed.
-- `known_non_delivery`: this home's ledger has no attempt for that ID.
+- `known_non_delivery`: this home's ledger has no attempt for that ID and no surviving inbox attempt marker or receipt contradicts that absence.
 - `duplicate_delivery`: that ID was already attempted with the same payload; no second delivery was attempted.
 - `submission_mismatch`: the ID already belongs to a different payload or binding; it cannot be repurposed.
 
 A timeout, lost response, unavailable socket, or process exit never proves non-delivery.
 Check the same ID through `reconcile`; never invent another ID to bypass an unknown result.
-An unknown attempt stays unknown if its evidence is lost, rather than being guessed safe to resend.
+An unknown attempt stays unknown if its ledger row is lost but an inbox attempt marker or note survives, rather than being guessed safe to resend.
+Submission also checks this surviving evidence before recording a new attempt.
+Loss of every copy of an attempt's evidence cannot be distinguished from an unused ID; preserving these records is part of the local-storage trust boundary.
 The adapter provides at-most-once enqueue attempts with durable reconciliation, not an exactly-once promise across arbitrary storage failure.
 Retain the home-local `state/explorer-receipts` ledger and inbox attempt markers while any submitted ID might still be reconciled.
 The inbox owner's existing acknowledgement procedure is unchanged.
@@ -99,6 +102,6 @@ The inbox owner's existing acknowledgement procedure is unchanged.
 ## Integration check
 
 Run `bin/fm-test-run.sh tests/fm-explorer-session.test.sh` for the executable socket, binding, receipt and security regression.
-The test uses the real process-event ownership and inbox commands with an inert fixture Lavish executable; it never starts a second real review listener or a terminal session.
+The test uses the real process-event ownership, session-lock, endpoint-validation and inbox commands with fixture process/endpoint responses and an inert Lavish executable; it never starts a second real review listener or a terminal session.
 The service is independent of worker runtime and terminal backend because it delivers only to the supervisor inbox and reads existing identity/ownership contracts.
 Explorer's isolated review host, IPC authorization and real UI handoff still require their own end-to-end checks.

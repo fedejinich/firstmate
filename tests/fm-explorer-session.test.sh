@@ -150,6 +150,15 @@ assert c.getresponse().status == 403
         bound = connect()
         assert bound['generation'] > previous_generation
         assert request('submit', submission=sid, text='retry', **bound)['status'] == 'submission_mismatch'
+        (state/'fake-endpoint-live').unlink()
+        assert request('discover')['status'] == 'ended_session'
+        assert request('submit', submission='5'*32, text='dead endpoint', **bound)['status'] == 'ended_session'
+        (state/'fake-endpoint-live').touch()
+        # Exercise surviving note evidence independently of the attempt marker.
+        orphan = '7'*32
+        subprocess.run([str(root/'bin/fm-inbox.sh'), 'feedback', orphan], input='original', text=True,
+                       env=env, check=True, stdout=subprocess.DEVNULL)
+        (state/'inbox'/('.explorer-'+orphan+'.attempt')).rmdir()
         (state/'review.meta').write_text('window=replaced\n')
         assert request('submit', submission='5'*32, text='wrong endpoint', **bound)['status'] == 'stale_generation'
         broker.terminate(); broker.wait(timeout=10)
@@ -158,6 +167,12 @@ assert c.getresponse().status == 403
         (state/'explorer-receipts/receipts.sqlite').unlink()
         start(3)
         assert request('reconcile', submission=sid)['status'] == 'unknown_acknowledgement'
+        assert request('reconcile', submission=orphan)['status'] == 'unknown_acknowledgement'
+        bound = connect()
+        assert request('submit', submission=sid, text='blind retry', **bound)['status'] == 'unknown_acknowledgement'
+        assert request('submit', submission=orphan, text='blind retry', **bound)['status'] == 'unknown_acknowledgement'
+        command('fm-inbox.sh', 'drain', '--ack', 'explorer-'+orphan)
+        assert request('reconcile', submission=orphan)['status'] == 'unknown_acknowledgement'
         command('fm-procevent.sh', 'retire', source)
         assert request('discover')['status'] == 'ended_session'
         (state/'.lock').write_text('1\n')
