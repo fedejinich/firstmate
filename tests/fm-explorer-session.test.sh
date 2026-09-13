@@ -2,7 +2,8 @@
 # Exercise the real Unix-socket broker and inbox with a fixture Lavish listener.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-export ROOT
+REAL_PYTHON=$(command -v python3)
+export ROOT REAL_PYTHON
 python3 - <<'PY'
 import http.client
 import json
@@ -20,7 +21,8 @@ with tempfile.TemporaryDirectory(prefix='fm-explorer-', dir='/tmp') as tmp:
     state = home / 'state'
     state.mkdir()
     (state / '.lock').write_text(str(os.getpid()) + '\n')
-    (state / 'review.meta').write_text('window=fixture\n')
+    (state / 'review.meta').write_text(
+        'window=fixture:fm-review\nworktree=' + str(home / 'worktree') + '\nproject=fixture\n')
     artifact = home / 'review.html'
     artifact.write_text('<h1>Review</h1>')
     tools = home / 'tools'
@@ -28,7 +30,15 @@ with tempfile.TemporaryDirectory(prefix='fm-explorer-', dir='/tmp') as tmp:
     lavish = tools / 'lavish-axi'
     lavish.write_text('#!/bin/sh\nsleep 120\n')
     lavish.chmod(0o700)
-    env = dict(os.environ, FM_HOME=str(home), PATH=str(tools)+':'+os.environ['PATH'])
+    (state / 'fake-endpoint-live').touch()
+    tmux = tools / 'tmux'
+    tmux.write_text('#!/bin/sh\n[ "$1" = display-message ] && [ -e "$FM_HOME/state/fake-endpoint-live" ] || exit 1\nprintf "%%1\\n"\n')
+    tmux.chmod(0o700)
+    ps = tools / 'ps'
+    ps.write_text('#!/bin/sh\ncase "$*" in\n  "-o comm= -p $FM_TEST_HARNESS_PID"|"-o args= -p $FM_TEST_HARNESS_PID") printf "pi\\n"; exit;;\nesac\nexec /bin/ps "$@"\n')
+    ps.chmod(0o700)
+    env = dict(os.environ, FM_HOME=str(home), FM_TEST_HARNESS_PID=str(os.getpid()),
+               PATH=str(tools)+':'+os.environ['PATH'])
     for key in ('FM_STATE_OVERRIDE', 'FM_DATA_OVERRIDE', 'FM_CONFIG_OVERRIDE'):
         env.pop(key, None)
     def command(name, *args):
@@ -80,6 +90,22 @@ with tempfile.TemporaryDirectory(prefix='fm-explorer-', dir='/tmp') as tmp:
             time.sleep(.05)
         else:
             raise AssertionError('listener did not start')
+        unauthorized = '''import os,subprocess,sys,time
+from pathlib import Path
+home, broker, artifact = sys.argv[1:]
+Path(home, "state/.lock").write_text(str(os.getpid()) + "\\n")
+p = subprocess.Popen([sys.executable, broker, "--home", home, "--task", "review",
+    "--artifact", artifact, "--version", "v1", "--directory", home+"/unauthorized",
+    "--sender-pid", str(os.getpid())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    code = p.wait(timeout=2)
+except subprocess.TimeoutExpired:
+    p.terminate(); p.wait(); code = 0
+raise SystemExit(code == 0)
+'''
+        subprocess.run([os.environ['REAL_PYTHON'], '-c', unauthorized, str(home),
+                        str(root/'bin/fm-explorer-session.py'), str(artifact)], env=env, check=True)
+        (state / '.lock').write_text(str(os.getpid()) + '\n')
         start(1)
         for headers in ({'Authorization':'Bearer wrong'}, {'Origin':'https://evil.example'},
                         {'X-Firstmate-Sender':'artifact-document'}, {'Host':'localhost'}):
@@ -127,7 +153,11 @@ assert c.getresponse().status == 403
         (state/'review.meta').write_text('window=replaced\n')
         assert request('submit', submission='5'*32, text='wrong endpoint', **bound)['status'] == 'stale_generation'
         broker.terminate(); broker.wait(timeout=10)
+        (state / 'review.meta').write_text(
+            'window=fixture:fm-review\nworktree=' + str(home / 'worktree') + '\nproject=fixture\n')
+        (state/'explorer-receipts/receipts.sqlite').unlink()
         start(3)
+        assert request('reconcile', submission=sid)['status'] == 'unknown_acknowledgement'
         command('fm-procevent.sh', 'retire', source)
         assert request('discover')['status'] == 'ended_session'
         (state/'.lock').write_text('1\n')

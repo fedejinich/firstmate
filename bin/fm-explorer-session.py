@@ -83,19 +83,19 @@ class Broker:
             raise ValueError("invalid task")
         if not version or len(version) > 256:
             raise ValueError("invalid version")
-        self.env = dict(os.environ, FM_HOME=str(self.home))
+        self.env = dict(os.environ, FM_HOME=str(self.home), FM_ROOT=str(ROOT.parent))
         # Overrides must not redirect delivery away from the authenticated home.
         for key in ("FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_ROOT_OVERRIDE"):
             self.env.pop(key, None)
         self.owner = int((self.state / ".lock").read_text().strip())
-        parent = os.getpid()
-        while parent != self.owner and parent > 1:
-            parent = int(run("/bin/ps", "-p", str(parent), "-o", "ppid="))
-        if parent != self.owner:
-            raise ValueError("only the owning supervisor may start this adapter")
+        subprocess.run([
+            "/bin/bash", "-c", '. "$1"; fm_session_lock_owned_by_self "$2"',
+            "fm-explorer-session", str(ROOT / "fm-session-lock-lib.sh"), str(self.state)
+        ], env=self.env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
         self.identity = process_identity(self.owner)
         self.lock = regular(self.state / ".lock")
         self.meta = regular(self.state / (task + ".meta"))
+        self.endpoint = self.require_task()
         self.file = regular(self.artifact)
         self.source = run(str(ROOT / "fm-procevent-lavish.sh"), "source-id", str(self.artifact), env=self.env)
         self.source_path = self.state / "procevent" / (self.source + ".source")
@@ -123,6 +123,17 @@ class Broker:
         self.db.execute("CREATE TABLE IF NOT EXISTS generations (id INTEGER PRIMARY KEY AUTOINCREMENT)")
         self.db.commit()
 
+    def require_task(self):
+        result = run(
+            "/bin/bash", "-c",
+            '. "$1"; fm_backend_validate_task_endpoint "$2" "$3" >/dev/null 2>&1 && '
+            'fm_backend_target_exists "$FM_BACKEND_VALIDATED_BACKEND" '
+            '"$FM_BACKEND_VALIDATED_TARGET" "fm-$3" && '
+            'printf "%s\\n%s" "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET"',
+            "fm-explorer-session", str(ROOT / "fm-backend.sh"),
+            str(self.state / (self.task + ".meta")), self.task, env=self.env)
+        return result.splitlines()
+
     def require_source(self):
         run(str(ROOT / "fm-procevent-lavish.sh"), "verify-source", str(self.artifact), env=self.env)
         rows = run(str(ROOT / "fm-procevent.sh"), "list", env=self.env).splitlines()
@@ -133,7 +144,8 @@ class Broker:
         try:
             if self.identity != process_identity(self.owner) or self.lock != regular(self.state / ".lock"):
                 return "ended_session"
-            if self.meta != regular(self.state / (self.task + ".meta")):
+            if (self.meta != regular(self.state / (self.task + ".meta"))
+                    or self.endpoint != self.require_task()):
                 return "stale_generation"
             if self.registration != regular(self.source_path):
                 return "stale_generation"
@@ -155,7 +167,9 @@ class Broker:
     def reconcile(self, submission):
         row = self.db.execute("SELECT 1 FROM receipts WHERE id=?", (submission,)).fetchone()
         if not row:
-            return self.response("known_non_delivery", submission=submission)
+            attempt = self.state / "inbox" / (".explorer-" + submission + ".attempt")
+            status = "unknown_acknowledgement" if attempt.exists() or attempt.is_symlink() else "known_non_delivery"
+            return self.response(status, submission=submission)
         status = "unknown_acknowledgement"
         # Locate only our exact body through the inbox owner's receipt interface.
         # Missing evidence after an attempted write is UNKNOWN, never retry permission.
@@ -216,7 +230,9 @@ class Broker:
             self.db.commit()
         except sqlite3.IntegrityError:
             self.db.rollback()
-            return self.response("duplicate_delivery", submission=sid)
+            stored = self.db.execute("SELECT body FROM receipts WHERE id=?", (sid,)).fetchone()
+            status = "duplicate_delivery" if stored and stored[0] == body else "submission_mismatch"
+            return self.response(status, submission=sid)
         try:
             subprocess.run([str(ROOT / "fm-inbox.sh"), "feedback", sid],
                            input=body, text=True, env=self.env, check=True,
