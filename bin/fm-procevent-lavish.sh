@@ -10,8 +10,13 @@
 #   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
+#   fm-procevent-lavish.sh verify-source <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
+#
+# verify-source succeeds only for this adapter's exact registered poll argv.
+# It neither starts nor consumes a listener; the process-event owner still owns
+# listener liveness and the registration's replacement identity.
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
@@ -124,7 +129,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -141,6 +146,20 @@ cmd_source_id() {
   else
     printf 'lavish-%s\n' "$(printf '%s' "$real" | sha256sum | awk '{print substr($1,1,16)}')"
   fi
+}
+
+cmd_verify_source() {
+  local artifact=${1-} id real status=1
+  [ "$#" -eq 1 ] || usage
+  id=$(cmd_source_id "$artifact") || return 1
+  real=$(perl -MCwd=realpath -e 'print realpath($ARGV[0])' "$artifact") || return 1
+  fm_procevent_source_lock_acquire "$id" || return 1
+  if fm_procevent_registration_matches_locked "$FM_HOME/state" lavish "$id" \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real"; then
+    status=0
+  fi
+  fm_procevent_source_lock_release "$id" || return 1
+  return "$status"
 }
 
 cmd_arm() {
@@ -680,6 +699,7 @@ case "${1-}" in
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
+  verify-source) shift; cmd_verify_source "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;

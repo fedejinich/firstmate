@@ -285,6 +285,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/artifact-explorer-session.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/arm-pretool-check.md",
       "audience": "maintainer-architecture"
     },
