@@ -95,6 +95,8 @@ EOF
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
+    "model=fable" \
+    "effort=high" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
   # A working ship task proves it through its own semantic busy-state record
@@ -731,6 +733,146 @@ EOF
   pass "undated captain holds age after a configurable threshold, decided only from structured fields"
 }
 
+# Work-style renderers need two facts per row that only this snapshot can own:
+# which model (and effort) the worker was dispatched on, and whether an
+# in-flight worker is still warm or has gone cold. Posture must come from real
+# recency signals and the recorded endpoint, never from spawn time alone, and
+# the quiet threshold must be the documented 12h unless overridden.
+test_dispatch_and_activity_posture() {
+  local home fakebin out now old fresh
+  home=$(make_home activity)
+  now=$(date +%s)
+  old=$((now - 20 * 3600))     # 20h: past the 12h default
+  fresh=$((now - 5 * 60))      # 5m: comfortably warm
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] warm-ship - Warm Ship (repo: alpha) (kind: ship) (since 2026-09-14)
+- [ ] cold-ship - Cold Ship (repo: alpha) (kind: ship) (since 2026-09-13)
+- [ ] revived-ship - Revived Ship (repo: alpha) (kind: ship) (since 2026-09-13)
+- [ ] dead-ship - Dead Ship (repo: alpha) (kind: ship) (since 2026-09-13)
+- [ ] legacy-ship - Legacy Ship (repo: alpha) (kind: ship) (since 2026-09-13)
+
+## Queued
+
+## Done
+EOF
+  # warm-ship: spawned long ago, but its busy record was written just now. The
+  # newest signal wins, so the row is under way and names the busy record.
+  fm_write_meta "$home/state/warm-ship.meta" \
+    "window=firstmate:fm-warm-ship" "project=alpha" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "model=fable" "effort=high" \
+    "spawn_gen=s$old.1.1"
+  record_claude_idle "$home/state" warm-ship
+  fm_touch_epoch "$fresh" "$home/state/warm-ship.busy-state"
+  # cold-ship: every signal is 20h old, including a status line and a turn-ended
+  # marker, and it once ran on another model before a relaunch.
+  fm_write_meta "$home/state/cold-ship.meta" \
+    "window=firstmate:fm-cold-ship" "project=alpha" "harness=pi" \
+    "kind=ship" "mode=no-mistakes" "model=openai-codex/gpt-6-astra" "effort=xhigh" \
+    "spawn_gen=s$((old - 3600)).1.1"
+  printf 'working: still going\n' > "$home/state/cold-ship.status"
+  : > "$home/state/cold-ship.turn-ended"
+  fm_touch_epoch "$old" "$home/state/cold-ship.status" "$home/state/cold-ship.turn-ended"
+  printf 'v1\ntask=cold-ship\nphase=complete\nfrom_model=grok-4.5\nto_model=openai-codex/gpt-6-astra\n' \
+    > "$home/state/cold-ship.control-relaunch"
+  # revived-ship: an old spawn whose only fresh signal is a progress touch.
+  fm_write_meta "$home/state/revived-ship.meta" \
+    "window=firstmate:fm-revived-ship" "project=alpha" "harness=pi" \
+    "kind=ship" "mode=no-mistakes" "model=default" "effort=default" \
+    "spawn_gen=s$old.1.1"
+  : > "$home/state/revived-ship.progress"
+  fm_touch_epoch "$fresh" "$home/state/revived-ship.progress"
+  # dead-ship: fresh signals, but its recorded endpoint is gone (no cmux CLI on
+  # PATH means the target cannot be found). Dead beats warm.
+  fm_write_meta "$home/state/dead-ship.meta" \
+    "backend=cmux" "window=workspace:surface" "project=alpha" "harness=codex" \
+    "kind=ship" "mode=no-mistakes" "model=gpt-6" "spawn_gen=s$fresh.1.1"
+  # legacy-ship: no spawn_gen and no dated signal at all - the snapshot says so
+  # rather than guessing.
+  fm_write_meta "$home/state/legacy-ship.meta" \
+    "window=firstmate:fm-legacy-ship" "project=alpha" "harness=codex" \
+    "kind=ship" "mode=no-mistakes"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "warm-ship")
+    | .dispatch == {model:"fable",effort:"high",models:["fable"]}
+      and .activity.posture == "under_way"
+      and .activity.suspended_reason == null
+      and .activity.source == "busy-record"
+      and .activity.age_seconds < 3600
+      and .activity.quiet_threshold_seconds == 43200
+      and (.activity.last_seen_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"))
+  ' >/dev/null || fail "warm ship must be under way on its fresh busy record with model+effort: $out"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "cold-ship")
+    | .dispatch.model == "openai-codex/gpt-6-astra"
+      and .dispatch.effort == "xhigh"
+      and .dispatch.models == ["openai-codex/gpt-6-astra","grok-4.5"]
+      and .activity.posture == "suspended"
+      and .activity.suspended_reason == "quiet"
+      and (.activity.source == "status-log" or .activity.source == "turn-ended")
+      and .activity.age_seconds >= 43200
+  ' >/dev/null || fail "cold ship must be suspended as quiet and list both distinct models: $out"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "revived-ship")
+    | .dispatch == {model:null,effort:null,models:[]}
+      and .activity.posture == "under_way"
+      and .activity.source == "progress"
+  ' >/dev/null || fail "a fresh progress touch must outrank an old spawn, and default model/effort must be null: $out"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "dead-ship")
+    | .endpoint.exists == false
+      and .activity.posture == "suspended"
+      and .activity.suspended_reason == "dead-endpoint"
+      and .activity.source == "spawn"
+      and .dispatch == {model:"gpt-6",effort:null,models:["gpt-6"]}
+  ' >/dev/null || fail "an absent endpoint must be suspended even with a fresh spawn: $out"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "legacy-ship")
+    | .activity == {last_seen_at:null,age_seconds:null,source:"none",quiet_threshold_seconds:43200,posture:null,suspended_reason:null}
+  ' >/dev/null || fail "a row with no dated signal must carry a null posture, not a guess: $out"
+  # The threshold is a documented knob: 60s turns the 5m-old warm ship cold.
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_QUIET_SECONDS=60 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "warm-ship")
+    | .activity.posture == "suspended"
+      and .activity.suspended_reason == "quiet"
+      and .activity.quiet_threshold_seconds == 60
+  ' >/dev/null || fail "FM_SNAPSHOT_QUIET_SECONDS must move the under-way/suspended split: $out"
+  local code=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_QUIET_SECONDS=soon "$SNAPSHOT" --json >/dev/null 2>&1 || code=$?
+  expect_code 2 "$code" "a non-numeric quiet threshold must be refused"
+  pass "task rows carry dispatch model/effort and a signal-based under-way/suspended posture"
+}
+
+# A persistent secondmate idles between requests by design, so its quiet age is
+# reported but never classified as suspended.
+test_secondmate_posture_is_never_suspended() {
+  local home fakebin out old
+  home=$(make_home mate-activity)
+  old=$(( $(date +%s) - 3 * 86400 ))
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/quiet-mate.meta" \
+    "window=firstmate:fm-quiet-mate" "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" "harness=codex" "kind=secondmate" \
+    "mode=secondmate" "home=$home/secondmate-home" "projects=alpha" \
+    "model=fable" "spawn_gen=s$old.1.1"
+  printf 'working: idle between requests\n' > "$home/state/quiet-mate.status"
+  fm_touch_epoch "$old" "$home/state/quiet-mate.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "quiet-mate")
+    | .activity.posture == null
+      and .activity.suspended_reason == null
+      and .activity.age_seconds >= 259000
+      and .dispatch.model == "fable"
+  ' >/dev/null || fail "a quiet secondmate must report its age but no suspended posture: $out"
+  pass "secondmate rows report activity age without an under-way/suspended posture"
+}
+
 test_view_renders_snapshot() {
   local home fakebin view
   home=$(make_home view)
@@ -739,6 +881,12 @@ test_view_renders_snapshot() {
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
   assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
+  assert_contains "$view" "| Watch / return channel | Model | Activity |" \
+    "view should carry the dispatch model and activity posture columns"
+  printf '%s\n' "$view" | grep -E '^\| ship-task \| .* \| fable·high \| under way [0-9]+m \|$' >/dev/null \
+    || fail "view should render the ship row's model+effort and a warm under-way posture: $view"
+  printf '%s\n' "$view" | grep -E '^\| secondmate-task \| .* \| - \| - [0-9.]+[mhd] \|$' >/dev/null \
+    || fail "view should render a secondmate with no model and no posture but an age: $view"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
   assert_contains "$view" "| done-task | Done Task | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
@@ -1061,5 +1209,7 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_dispatch_and_activity_posture
+test_secondmate_posture_is_never_suspended
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
