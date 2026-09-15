@@ -66,11 +66,10 @@
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
 #     dispatch is the worker's recorded model choice: model and effort are the
-#     meta model=/effort= values with an absent or "default" value as null, and
-#     models lists every distinct non-default model this task id has run on,
-#     current meta first and then the from_model/to_model of a
-#     state/<id>.control-relaunch journal, so a renderer can show one compact
-#     model label (with effort when set) per row.
+#     meta model=/effort= values with an absent or "default" value as null.
+#     models is a best-effort distinct list from the current metadata and latest
+#     state/<id>.control-relaunch journal. It includes to_model only for a
+#     completed relaunch and is not a lifetime audit log.
 #     activity is the worker-recency observation Work-style renderers refine
 #     the under-way bucket with. last_seen_at/age_seconds come from the newest
 #     dated worker signal - the mtime of state/<id>.busy-state, .progress,
@@ -78,8 +77,8 @@
 #     exists - and source names which one won (busy-record, progress,
 #     turn-ended, status-log, spawn, or none). These are recency facts only,
 #     the same busy-age evidence bin/fm-watch.sh reads beside turn-ended; they
-#     never replace current_state. posture is "suspended" when the recorded
-#     local endpoint is absent (suspended_reason "dead-endpoint") or when
+#     never replace current_state. posture is "suspended" when a recorded local
+#     endpoint was positively observed absent (suspended_reason "dead-endpoint") or when
 #     age_seconds is at least FM_SNAPSHOT_QUIET_SECONDS (default 43200, 12h;
 #     suspended_reason "quiet"), "under_way" when a dated signal is fresher
 #     than that, and null when the snapshot cannot decide: a persistent
@@ -306,11 +305,13 @@ An undated hold ages once its hold-set timestamp is at least
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; 0 ages every hold with a
 non-negative computed age); legacy holds without a stamp fall back to their
 since date, and re-holding with --until remains the durable deferral.
-Each task row carries dispatch (model, effort, distinct models) and activity
-(newest dated worker signal, its age, and an under_way/suspended posture): a
-local task whose endpoint is absent or whose newest signal is at least
-FM_SNAPSHOT_QUIET_SECONDS old (default 43200, 12h) is suspended; secondmates,
-remote tasks, and rows with no dated signal carry a null posture.
+Each task row carries dispatch (model, effort, and models known from current
+metadata plus the latest completed relaunch) and activity (newest dated worker
+signal, its age, and an under_way/suspended posture). A local task whose recorded
+target is positively observed absent or whose newest signal is at least
+FM_SNAPSHOT_QUIET_SECONDS old (default 43200, 12h) is suspended. Secondmates,
+remote tasks, and rows with no dated signal and no proven-dead endpoint carry a
+null posture.
 EOF
 }
 
@@ -807,7 +808,7 @@ task_json_lines() {
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
-  local model effort models_json last_seen last_seen_source relaunch_journal
+  local model effort models_json last_seen last_seen_source relaunch_journal relaunch_phase relaunch_to_model
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -826,12 +827,15 @@ task_json_lines() {
     spawn_gen=$(meta_value "$meta" spawn_gen)
     model=$(meta_value "$meta" model)
     effort=$(meta_value "$meta" effort)
-    # Distinct models this task id has run on: the current meta first, then the
-    # last relaunch journal's from/to pair. The journal is firstmate's durable
-    # relaunch record (bin/fm-control.sh); an absent or unreadable one adds none.
+    # Best-effort distinct models from current metadata and the latest relaunch.
+    # A failed journal still proves from_model ran, but not that to_model did.
     relaunch_journal="$STATE/$id.control-relaunch"
-    models_json=$(printf '%s\n%s\n%s\n' "$model" \
-        "$(meta_value "$relaunch_journal" to_model 2>/dev/null || true)" \
+    relaunch_phase=$(meta_value "$relaunch_journal" phase 2>/dev/null || true)
+    relaunch_to_model=
+    if [ "$relaunch_phase" = complete ]; then
+      relaunch_to_model=$(meta_value "$relaunch_journal" to_model 2>/dev/null || true)
+    fi
+    models_json=$(printf '%s\n%s\n%s\n' "$model" "$relaunch_to_model" \
         "$(meta_value "$relaunch_journal" from_model 2>/dev/null || true)" \
       | jq -R -s '[splits("\n") | select(. != "" and . != "default")]
                   | reduce .[] as $m ([]; if index([$m]) then . else . + [$m] end)')

@@ -775,18 +775,21 @@ EOF
   fm_touch_epoch "$old" "$home/state/cold-ship.status" "$home/state/cold-ship.turn-ended"
   printf 'v1\ntask=cold-ship\nphase=complete\nfrom_model=grok-4.5\nto_model=openai-codex/gpt-6-astra\n' \
     > "$home/state/cold-ship.control-relaunch"
-  # revived-ship: an old spawn whose only fresh signal is a progress touch.
+  # revived-ship: an old spawn whose only fresh signal is a progress touch. Its
+  # failed relaunch proves the prior model ran, but not the attempted model.
   fm_write_meta "$home/state/revived-ship.meta" \
     "window=firstmate:fm-revived-ship" "project=alpha" "harness=pi" \
     "kind=ship" "mode=no-mistakes" "model=default" "effort=default" \
     "spawn_gen=s$old.1.1"
   : > "$home/state/revived-ship.progress"
   fm_touch_epoch "$fresh" "$home/state/revived-ship.progress"
-  # dead-ship: fresh signals, but its recorded endpoint is gone (no cmux CLI on
-  # PATH means the target cannot be found). Dead beats warm.
+  printf 'v1\ntask=revived-ship\nphase=failed:launching\nfrom_model=fable\nto_model=gpt-never-ran\n' \
+    > "$home/state/revived-ship.control-relaunch"
+  # dead-ship has no dated signal, but its recorded endpoint is gone (no cmux
+  # CLI on PATH means the target cannot be found). Proven dead beats unknown.
   fm_write_meta "$home/state/dead-ship.meta" \
     "backend=cmux" "window=workspace:surface" "project=alpha" "harness=codex" \
-    "kind=ship" "mode=no-mistakes" "model=gpt-6" "spawn_gen=s$fresh.1.1"
+    "kind=ship" "mode=no-mistakes" "model=gpt-6"
   # legacy-ship: no spawn_gen and no dated signal at all - the snapshot says so
   # rather than guessing.
   fm_write_meta "$home/state/legacy-ship.meta" \
@@ -816,18 +819,19 @@ EOF
   ' >/dev/null || fail "cold ship must be suspended as quiet and list both distinct models: $out"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "revived-ship")
-    | .dispatch == {model:null,effort:null,models:[]}
+    | .dispatch == {model:null,effort:null,models:["fable"]}
       and .activity.posture == "under_way"
       and .activity.source == "progress"
-  ' >/dev/null || fail "a fresh progress touch must outrank an old spawn, and default model/effort must be null: $out"
+  ' >/dev/null || fail "a failed relaunch must omit its attempted model while retaining known model evidence: $out"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "dead-ship")
     | .endpoint.exists == false
       and .activity.posture == "suspended"
       and .activity.suspended_reason == "dead-endpoint"
-      and .activity.source == "spawn"
+      and .activity.source == "none"
+      and .activity.age_seconds == null
       and .dispatch == {model:"gpt-6",effort:null,models:["gpt-6"]}
-  ' >/dev/null || fail "an absent endpoint must be suspended even with a fresh spawn: $out"
+  ' >/dev/null || fail "a positively absent endpoint must suspend even without a dated signal: $out"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "legacy-ship")
     | .activity == {last_seen_at:null,age_seconds:null,source:"none",quiet_threshold_seconds:43200,posture:null,suspended_reason:null}
