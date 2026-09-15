@@ -65,31 +65,6 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
-#     dispatch is the worker's recorded model choice: model and effort are the
-#     meta model=/effort= values with an absent or "default" value as null.
-#     models is a best-effort distinct list from the current metadata and latest
-#     state/<id>.control-relaunch journal. It includes to_model only for a
-#     completed relaunch and is not a lifetime audit log.
-#     activity is the worker-recency observation Work-style renderers refine
-#     the under-way bucket with. last_seen_at/age_seconds come from the newest
-#     dated worker signal - the mtime of state/<id>.busy-state, .progress,
-#     .turn-ended, or .status, or the spawn_gen epoch when no later signal
-#     exists - and source names which one won (busy-record, progress,
-#     turn-ended, status-log, spawn, or none). These are recency facts only,
-#     the same busy-age evidence bin/fm-watch.sh reads beside turn-ended; they
-#     never replace current_state. posture is "suspended" when a recorded local
-#     endpoint was positively observed absent (suspended_reason "dead-endpoint") or when
-#     age_seconds is at least FM_SNAPSHOT_QUIET_SECONDS (default 43200, 12h;
-#     suspended_reason "quiet"), "under_way" when a dated signal is fresher
-#     than that, and null when the snapshot cannot decide: a persistent
-#     secondmate (an idle endpoint is healthy), a remote task (liveness is not
-#     collected here), or a legacy row with no dated signal at all. The 12h
-#     default is the observed gap between live workers (minutes to a few hours
-#     between turns, including one no-mistakes fix round of up to ~90 minutes)
-#     and abandoned workers left on the board (15h to days); watcher stale
-#     thresholds are minutes-scale wedge detectors and deliberately not reused.
-#     Renderers apply captain-hold and blocker classification first; posture
-#     only splits what remains of the under-way bucket.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -226,18 +201,6 @@ case "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" in
     exit 2
     ;;
 esac
-# Quiet threshold splitting a live under-way worker from a suspended one; the
-# header's activity paragraph owns the choice of 12h.
-FM_SNAPSHOT_QUIET_SECONDS=${FM_SNAPSHOT_QUIET_SECONDS:-43200}
-validate_positive_bound FM_SNAPSHOT_QUIET_SECONDS "$FM_SNAPSHOT_QUIET_SECONDS"
-
-# mtime of a file as an epoch. Platform-detected once, never `-f || -c`: GNU
-# `stat -f` is filesystem stat and exits 0 with garbage (bin/fm-busy-event.sh).
-if [ "$(uname)" = Darwin ]; then
-  snapshot_file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
-else
-  snapshot_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -305,13 +268,6 @@ An undated hold ages once its hold-set timestamp is at least
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; 0 ages every hold with a
 non-negative computed age); legacy holds without a stamp fall back to their
 since date, and re-holding with --until remains the durable deferral.
-Each task row carries dispatch (model, effort, and models known from current
-metadata plus the latest completed relaunch) and activity (newest dated worker
-signal, its age, and an under_way/suspended posture). A local task whose recorded
-target is positively observed absent or whose newest signal is at least
-FM_SNAPSHOT_QUIET_SECONDS old (default 43200, 12h) is suspended. Secondmates,
-remote tasks, and rows with no dated signal and no proven-dead endpoint carry a
-null posture.
 EOF
 }
 
@@ -650,45 +606,10 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
-# Newest dated worker signal for a task: the mtimes of its busy record,
-# progress marker, turn-ended marker, and status log, with the spawn_gen epoch
-# as the floor when nothing later exists. Recency only, never state.
-task_activity_observation() {  # <meta> <id> -> last_seen=<epoch|>\nlast_seen_source=<src>
-  local meta=$1 id=$2 spawn_gen epoch best='' best_source=none candidate name path
-  spawn_gen=$(meta_value "$meta" spawn_gen)
-  case "$spawn_gen" in
-    s[0-9]*)
-      epoch=${spawn_gen#s}
-      epoch=${epoch%%.*}
-      case "$epoch" in
-        ''|*[!0-9]*) ;;
-        *) best=$epoch; best_source=spawn ;;
-      esac
-      ;;
-  esac
-  for name in busy-state progress turn-ended status; do
-    path="$STATE/$id.$name"
-    [ -e "$path" ] || continue
-    candidate=$(snapshot_file_mtime "$path") || continue
-    case "$candidate" in ''|*[!0-9]*) continue ;; esac
-    if [ -z "$best" ] || [ "$candidate" -gt "$best" ]; then
-      best=$candidate
-      case "$name" in
-        busy-state) best_source=busy-record ;;
-        status) best_source=status-log ;;
-        *) best_source=$name ;;
-      esac
-    fi
-  done
-  printf 'last_seen=%s\nlast_seen_source=%s\n' "$best" "$best_source"
-}
-
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture report_path report_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
-  local activity='last_seen=
-last_seen_source=none'
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
@@ -703,9 +624,6 @@ last_seen_source=none'
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
-  if [ "$generation_current" = 1 ]; then
-    activity=$(task_activity_observation "$meta" "$id")
-  fi
   if [ -n "$remote_host" ]; then
     jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
       > "$current_file" || current_rc=1
@@ -741,10 +659,8 @@ last_seen_source=none'
       > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
-    activity='last_seen=
-last_seen_source=none'
   fi
-  printf 'endpoint_exists=%s\nagent_alive=%s\n%s\n' "$endpoint_exists" "$agent_alive" "$activity" > "$endpoint_file" || current_rc=1
+  printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
   return "$current_rc"
 }
 
@@ -808,7 +724,6 @@ task_json_lines() {
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
-  local model effort models_json last_seen last_seen_source relaunch_journal relaunch_phase relaunch_to_model
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -825,20 +740,6 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     spawn_gen=$(meta_value "$meta" spawn_gen)
-    model=$(meta_value "$meta" model)
-    effort=$(meta_value "$meta" effort)
-    # Best-effort distinct models from current metadata and the latest relaunch.
-    # A failed journal still proves from_model ran, but not that to_model did.
-    relaunch_journal="$STATE/$id.control-relaunch"
-    relaunch_phase=$(meta_value "$relaunch_journal" phase 2>/dev/null || true)
-    relaunch_to_model=
-    if [ "$relaunch_phase" = complete ]; then
-      relaunch_to_model=$(meta_value "$relaunch_journal" to_model 2>/dev/null || true)
-    fi
-    models_json=$(printf '%s\n%s\n%s\n' "$model" "$relaunch_to_model" \
-        "$(meta_value "$relaunch_journal" from_model 2>/dev/null || true)" \
-      | jq -R -s '[splits("\n") | select(. != "" and . != "default")]
-                  | reduce .[] as $m ([]; if index([$m]) then . else . + [$m] end)')
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
     if [ -n "$remote_host" ]; then
@@ -906,15 +807,11 @@ task_json_lines() {
 
     endpoint_exists=null
     agent_alive=not_checked
-    last_seen=''
-    last_seen_source=none
     endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
     while IFS= read -r observation_line || [ -n "$observation_line" ]; do
       case "$observation_line" in
         endpoint_exists=*) endpoint_exists=${observation_line#*=} ;;
         agent_alive=*) agent_alive=${observation_line#*=} ;;
-        last_seen=*) last_seen=${observation_line#*=} ;;
-        last_seen_source=*) last_seen_source=${observation_line#*=} ;;
       esac
     done < "$endpoint_file" || {
       snapshot_task_cleanup
@@ -951,13 +848,6 @@ task_json_lines() {
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
-      --arg model "$model" \
-      --arg effort "$effort" \
-      --argjson models "$models_json" \
-      --arg last_seen "$last_seen" \
-      --arg last_seen_source "$last_seen_source" \
-      --argjson snapshot_epoch "$SNAPSHOT_EPOCH" \
-      --argjson quiet_seconds "$FM_SNAPSHOT_QUIET_SECONDS" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
@@ -995,28 +885,6 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        dispatch:{
-          model:($model | if . == "" or . == "default" then null else . end),
-          effort:($effort | if . == "" or . == "default" then null else . end),
-          models:$models
-        },
-        activity:(
-          (if $last_seen == "" then null else ($last_seen | tonumber) end) as $seen
-          | (if $seen == null then null else ([$snapshot_epoch - $seen, 0] | max) end) as $age
-          | (if $kind == "secondmate" or $remote_host != "" then null
-             elif $endpoint_exists == false then "dead-endpoint"
-             elif $age != null and $age >= $quiet_seconds then "quiet"
-             else null end) as $reason
-          | {
-              last_seen_at:(if $seen == null then null else ($seen | todate) end),
-              age_seconds:$age,
-              source:$last_seen_source,
-              quiet_threshold_seconds:$quiet_seconds,
-              posture:(if $reason != null then "suspended"
-                       elif $kind == "secondmate" or $remote_host != "" or $age == null then null
-                       else "under_way" end),
-              suspended_reason:$reason
-            }),
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,
