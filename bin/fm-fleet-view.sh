@@ -50,23 +50,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   def action_of($t):
     if $t.kind == "secondmate" then "\($t.actions.send) - \($t.actions.watch)"
     else $t.actions.watch end;
-  def model_of($t):
-    (if ($t.dispatch.models // []) | length > 1 then ($t.dispatch.models | join("/"))
-     else ($t.dispatch.model // "") end) as $m
-    | if $m == "" then "-"
-      elif ($t.dispatch.effort // "") == "" then $m
-      else "\($m)·\($t.dispatch.effort)" end;
-  def age_text($s):
-    if $s == null then "?"
-    elif $s < 3600 then "\($s / 60 | floor)m"
-    elif $s < 86400 then "\($s / 3600 | floor)h"
-    else "\(($s / 8640 | floor) / 10)d" end;
-  def activity_of($t):
-    (if $t.activity.posture == null then "-" else ($t.activity.posture | gsub("_"; " ")) end) as $p
-    | (if $t.activity.suspended_reason == null then "" else " (\($t.activity.suspended_reason))" end) as $why
-    | "\($p) \(age_text($t.activity.age_seconds))\($why)";
   def task_row($t):
-    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) | \(model_of($t)) | \(activity_of($t)) |";
+    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
   def blocker($r):
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
@@ -83,8 +68,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if (.tasks | length) == 0 then
     "No live task metadata found."
    else
-    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel | Model | Activity |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     (.tasks[] | task_row(.))
    end),
   "",
