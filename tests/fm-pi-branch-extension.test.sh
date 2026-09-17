@@ -149,6 +149,21 @@ export class DefaultResourceLoader {
   }
 }
 
+export class SettingsManager {
+  static inMemory(settings = {}) {
+    return {
+      settings,
+      getRetrySettings() {
+        return {
+          enabled: settings.retry?.enabled ?? true,
+          maxRetries: settings.retry?.maxRetries ?? 3,
+          baseDelayMs: settings.retry?.baseDelayMs ?? 2000,
+        };
+      },
+    };
+  }
+}
+
 export class SessionManager {
   constructor(file) {
     this.file = file;
@@ -684,6 +699,14 @@ if (mainUserMessages.length !== 0) throw new Error("accepted wake leaked to main
 const session = globalThis.__fmSessions[0];
 if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_branch_report"])) {
   throw new Error(`unexpected tool order: ${JSON.stringify(session.options.tools)}`);
+}
+// Branch owns settled-error latching; Pi auto-retry would only multiply dead
+// transport attempts before the prompt settles. Retry must be off at create.
+if (!session.options.settingsManager) {
+  throw new Error("branch createAgentSession did not receive a settingsManager");
+}
+if (session.options.settingsManager.getRetrySettings().enabled !== false) {
+  throw new Error("branch session left Pi auto-retry enabled");
 }
 const loader = globalThis.__fmLoaders[0];
 for (const key of ["noExtensions", "noSkills", "noPromptTemplates", "noThemes", "noContextFiles"]) {

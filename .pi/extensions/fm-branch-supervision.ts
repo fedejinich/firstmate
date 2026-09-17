@@ -80,6 +80,7 @@ import {
   ModelRuntime,
   type ModelRegistry,
   SessionManager,
+  SettingsManager,
   ToolExecutionComponent,
   type AgentSession,
   type ExtensionAPI,
@@ -1306,10 +1307,17 @@ ${context.command}
         };
       },
     });
+    // Branch failure detection is Firstmate's settled-error latch, not Pi's
+    // InteractiveMode auto-retry. Leaving retry enabled multiplies one dead
+    // transport into several assistant error entries per wake before the
+    // prompt settles, delaying the latch and thrashing the provider without
+    // any captain-visible benefit (the branch has no TUI).
+    const branchSettings = SettingsManager.inMemory({ retry: { enabled: false } });
     const created = await createAgentSession({
       cwd: fmRoot,
       sessionManager,
       resourceLoader: loader,
+      settingsManager: branchSettings,
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [
         bashTool as unknown as ToolDefinition,
