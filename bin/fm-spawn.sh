@@ -5077,7 +5077,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_agent_session zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5549,6 +5549,15 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
+# The registration a reused pane still carries from its previous agent, which
+# spawn_record_herdr_agent_session must not mistake for the new agent's.
+HERDR_PRELAUNCH_AGENT_SESSION=
+if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$T" \
+  && HERDR_PRELAUNCH_AGENT_SESSION=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null); then
+  HERDR_PRELAUNCH_AGENT_SESSION=${HERDR_PRELAUNCH_AGENT_SESSION#*$'\t'}
+else
+  HERDR_PRELAUNCH_AGENT_SESSION=
+fi
 SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
@@ -5616,6 +5625,49 @@ if [ "$HARNESS" = agy ]; then
     fi
     exit 1
   fi
+fi
+
+# Herdr endpoint identity: record the session herdr registers for the agent
+# just launched, as herdr_agent_session, so a later reader can tell this task's
+# agent from another one that took over the same pane after it exited
+# (bin/fm-backend.sh's fm_backend_endpoint_not_task_agent). The adapter's
+# fm_backend_herdr_wait_agent_session waits up to FM_SPAWN_AGENT_SESSION_WAIT
+# seconds (default 15) while the agent starts.
+# Best effort: an agent herdr never registers leaves no record, which only
+# means that reuse cannot be detected for this task. A raw command that is not a
+# verified harness adapter is not an agent herdr registers, so it is not waited on.
+spawn_record_herdr_agent_session() {
+  local meta="$STATE/$ID.meta" wait=${FM_SPAWN_AGENT_SESSION_WAIT:-15} session status=0 acquired=0 stale=$HERDR_PRELAUNCH_AGENT_SESSION
+  fm_control_harness_family "$HARNESS" >/dev/null 2>&1 || return 0
+  # A resumed launch deliberately keeps the earlier session (relaunch_resume_args).
+  [ -z "$RESUME_ARGS" ] || stale=
+  if ! session=$(fm_backend_herdr_wait_agent_session "$T" "$wait" "$stale"); then
+    echo "notice: herdr registered no agent session for task $ID in $T within ${wait}s; a later agent reusing that pane cannot be told apart from this one" >&2
+    return 0
+  fi
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+    acquired=1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.agent-session.${BASHPID:-$$}"
+  if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
+    ! awk -F= '$1 != "herdr_agent_session"' "$meta" >"$SPAWN_META_TMP" ||
+    ! printf 'herdr_agent_session=%s\n' "$session" >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+    status=1
+    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  fi
+  SPAWN_META_TMP=
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK" || status=1
+    SPAWN_META_LOCK_HELD=0
+  fi
+  return "$status"
+}
+if [ "$BACKEND" = herdr ] && ! spawn_record_herdr_agent_session; then
+  echo "warning: task $ID's herdr agent session could not be recorded in its task record; a later agent reusing its pane cannot be told apart from this one" >&2
 fi
 
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then

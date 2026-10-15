@@ -1135,6 +1135,89 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
+# --- herdr endpoint identity -------------------------------------------------
+#
+# A herdr task record whose pane is the firstmate session's own, or now holds an
+# agent whose herdr session differs from the one the spawn recorded, names no
+# worker. Every lifecycle verb and every steer refuses it before any herdr call
+# that could type, ring, or close, which the stub's log proves.
+
+# add_herdr_task <case-dir> <id> [recorded-agent-session]: a herdr record at
+# default:w1:p2 plus a herdr stub whose agent get reports the session in
+# $dir/fake/herdr-session and logs every call to $dir/fake/herdr-log.
+add_herdr_task() {
+  local dir=$1 id=$2 recorded=${3:-}
+  add_task "$dir" "$id" claude ship herdr default:w1:p2
+  {
+    echo "herdr_session=default"
+    echo "herdr_workspace_id=w1"
+    echo "herdr_tab_id=w1:t2"
+    echo "herdr_pane_id=w1:p2"
+    [ -z "$recorded" ] || echo "herdr_agent_session=$recorded"
+  } >> "$dir/home/state/$id.meta"
+  : > "$dir/fake/herdr-log"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_DIR/herdr-log"
+case "$1 ${2:-}" in
+  "status --json") printf '{"server":{"running":true}}\n' ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"%s"}}}}\n' \
+      "$(cat "$FM_FAKE_DIR/herdr-session")" ;;
+  *) printf '{"result":{}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/herdr"
+}
+
+herdr_input_calls() {  # <case-dir>
+  grep -E '^pane (send-text|send-keys|run|close)' "$1/fake/herdr-log" || true
+}
+
+test_herdr_foreign_agent_refuses_every_verb_and_steer() {
+  local dir out rc verb
+  dir=$(new_case herdr-foreign)
+  add_herdr_task "$dir" t1 aaaa-1111
+  printf 'bbbb-2222' > "$dir/fake/herdr-session"
+  for verb in interrupt exit relaunch; do
+    out=$(run_control "$dir" t1 "$verb"); rc=$?
+    expect_code 1 "$rc" "$verb on a pane holding another agent should refuse"$'\n'"$out"
+    assert_contains "$out" "now holds another agent (herdr session bbbb-2222, recorded aaaa-1111)" \
+      "the $verb refusal should name both agent sessions"
+  done
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SEND_SETTLE=0 \
+    "$SEND" t1 "keep going" 2>&1); rc=$?
+  expect_code 1 "$rc" "a steer to a pane holding another agent should refuse"$'\n'"$out"
+  assert_contains "$out" "refusing to steer it" "the steer refusal should say it refused"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "a refused steer must record nothing"
+  [ -z "$(herdr_input_calls "$dir")" ] || fail "a refused verb or steer reached the pane: $(herdr_input_calls "$dir")"
+  printf 'aaaa-1111' > "$dir/fake/herdr-session"
+  out=$(run_control "$dir" t1 interrupt)
+  assert_not_contains "$out" "another agent" "the task's own recorded agent session was refused"
+  pass "fm-control/fm-send: a herdr pane holding another agent session refuses every verb and steer"
+}
+
+test_herdr_own_session_pane_refuses_every_verb_and_steer() {
+  local dir out rc verb
+  dir=$(new_case herdr-self)
+  add_herdr_task "$dir" t1
+  printf 'cccc-3333' > "$dir/fake/herdr-session"
+  for verb in interrupt exit relaunch; do
+    out=$(unset FM_BACKEND_HERDR_SELF_PANE FM_BACKEND_HERDR_SELF_SESSION HERDR_SESSION
+      export HERDR_PANE_ID=w1:p2
+      run_control "$dir" t1 "$verb"); rc=$?
+    expect_code 1 "$rc" "$verb on the firstmate session's own pane should refuse"$'\n'"$out"
+    assert_contains "$out" "is this firstmate session's own pane" "the $verb refusal should name the firstmate session"
+  done
+  out=$(env -u FM_BACKEND_HERDR_SELF_PANE -u FM_BACKEND_HERDR_SELF_SESSION -u HERDR_SESSION HERDR_PANE_ID=w1:p2 \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SEND_SETTLE=0 \
+    "$SEND" t1 "keep going" 2>&1); rc=$?
+  expect_code 1 "$rc" "a steer to the firstmate session's own pane should refuse"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "a refused steer must record nothing"
+  [ -z "$(herdr_input_calls "$dir")" ] || fail "a refused verb or steer reached the pane: $(herdr_input_calls "$dir")"
+  pass "fm-control/fm-send: a herdr record naming the firstmate session's own pane refuses every verb and steer"
+}
+
 # Only an adapter whose runtime records an exact per-pane agent session has a
 # relaunch resume form, and only a reference its OWN agent reported may be
 # handed to it: resuming another adapter's reference would inject that agent's
@@ -1217,3 +1300,5 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_herdr_foreign_agent_refuses_every_verb_and_steer
+test_herdr_own_session_pane_refuses_every_verb_and_steer

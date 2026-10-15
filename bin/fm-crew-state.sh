@@ -157,6 +157,10 @@
 #      unreachable, and an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
+#      Before any pane read there, an endpoint that is the firstmate session's
+#      own pane, or holds an agent other than the one the task spawned
+#      (bin/fm-backend.sh's fm_backend_endpoint_not_task_agent), reports
+#      unknown · none naming that, never alive.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -1234,6 +1238,12 @@ fi
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+# An endpoint that is this firstmate session's own pane, or that now holds an
+# agent other than the one this task spawned, is not this task's agent, however
+# alive it reads: its screen and busy state describe someone else.
+if NOT_TASK_AGENT=$(fm_backend_endpoint_not_task_agent "$TASK_BACKEND" "$BACKEND_TARGET" "$META"); then
+  emit unknown none "not this task's agent: ${NOT_TASK_AGENT#*$'\t'}"
+fi
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
   # error or stall under load, and tmux can fail to be executed at all (a

@@ -20,7 +20,8 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
-| What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
+| What task metadata records for a Herdr endpoint, and why a record naming the firstmate pane or another agent is refused | [Endpoint metadata](#endpoint-metadata) and [Endpoint identity](#endpoint-identity) |
+| Why routine reads never scroll a worker's screen | [Passive pane reads](#passive-pane-reads) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
@@ -511,11 +512,29 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+herdr_agent_session=<agent-session>
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+`herdr_agent_session=` is the session Herdr registered for the launched agent (`agent get`'s `.agent.agent_session.value`), recorded by `bin/fm-spawn.sh` once the agent registers and absent when it never does.
+
+### Endpoint identity
+
+A pane outlives its agent, so a record can name a pane that now belongs to someone else.
+Two cases are refused, and the record is then reconciled rather than acted on:
+
+- **The firstmate session's own pane.**
+  The watcher, crew-state reads, steers, and lifecycle control all run inside the supervising session and inherit its `HERDR_PANE_ID`; Herdr injects `HERDR_SESSION` only into named-session panes, so an absent one means `default`.
+  The adapter refuses every read, send, and close of that pane at target readiness and observability (`fm_backend_herdr_self_guard`), so no caller can reach its own session by accident.
+  `bin/fm-backend.sh` captures that identity when it is sourced, because `bin/fm-spawn.sh` reuses the `HERDR_PANE_ID` name for the task's pane.
+  The away-mode daemon is the one exception: typing escalations into the firstmate pane is its job, so it names exactly that target for its own supervisor-pane calls.
+- **Another agent.**
+  An agent registered in the pane whose session differs from `herdr_agent_session=` is not the task's agent.
+  Without a recorded session, or without a readable registration, nothing is claimed.
+
+`fm_backend_endpoint_not_task_agent` in `bin/fm-backend.sh` is the one check for both: `bin/fm-control.sh` refuses every verb, `bin/fm-send.sh` refuses the steer before recording anything, `bin/fm-crew-state.sh` reports `unknown · none` naming the finding instead of reading the pane, and the watcher raises one wake naming it and then stops reading, ringing, and stale-checking that window until the finding changes or clears.
 
 ## Current transport behavior
 
@@ -608,12 +627,17 @@ A right-aligned status token on the composer row stays content for every other c
 The poll density bounds the residual possibility of an extremely fast complete turn.
 A missed native transition falls through to the composer verdict rather than reporting a false swallow.
 
-### Capture size
+### Passive pane reads
 
-`pane read --lines N` can return empty output when N is below the viewport height.
-The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
-This generous floor is required for the small bounded reads that remain: peek and watch tails, the rendered busy-footer read, and the shared steering-inbox pending-line read.
-The adapter's own composer reads are exempt because they read the visible viewport instead, which takes no line count (see [Claude composer proof](#claude-composer-proof)).
+A pane read must never move what someone watching the pane sees.
+Herdr does not guarantee that for a history read: for a pane holding an idle agent in the alternate screen, `pane read --source recent` or `recent-unwrapped` with `--lines` above the viewport makes Herdr write SGR mouse-wheel input into the pane, scrolling the agent's own transcript to harvest it and then scrolling back.
+Claude Code shows that as its view jumping up with a `Jump to bottom` pill and snapping back, and `herdr agent read --help` describes the harvest as intended behavior for idle agents.
+`--source visible` (text or ANSI), `--source detection`, `agent get`, `pane get`, `pane process-info`, and the list commands write nothing.
+
+Every routine read - watcher tails, crew-state reads, the rendered busy footer, composer checks, and the steering-inbox pending-line read - therefore goes through `fm_backend_herdr_capture`, which reads only `--source visible` and trims trailing blank rows and then to the caller's bound.
+A request larger than the viewport returns the viewport.
+The one deep read is `fm_backend_history_capture`, used only by an operator's `bin/fm-peek.sh`: it stays on the visible read unless the request exceeds the viewport height from `pane get`'s `.scroll.viewport_rows`, and only then reads `--source recent --lines N`.
+The old 200-line floor is retired: it existed only because a `recent` read below the viewport could come back empty.
 
 ### Native idle state
 
@@ -845,6 +869,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 tests/fm-backend-herdr.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+tests/fm-herdr-passive-read-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh

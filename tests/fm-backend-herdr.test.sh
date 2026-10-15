@@ -3719,37 +3719,35 @@ test_normalize_key() {
 
 # --- capture / send_key / kill / current_path --------------------------------
 
-test_capture_calls_pane_read() {
+test_capture_reads_only_the_visible_viewport() {
   local dir log resp fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf 'line one\nline two\nline three\n' > "$resp/1.out"
+  # A short screen: content rows, then the viewport's blank rows below them.
+  printf 'line one\nline two\nline three\n\n   \n\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
-  # Requesting 250 (already >= the 200 floor) passes straight through as the
-  # fetch bound; the adapter then trims to the caller's requested 250 lines
-  # locally, so all 3 fake lines survive.
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250' "$ROOT" )
-  [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not pass through pane read output, got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
-    "capture did not call pane read with the right pane id and line bound"
-  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N' with the session set"
+  [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not return the viewport's content rows without its trailing blank rows, got '$out'"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible'$'\x1f''--session' \
+    "capture did not read the pane's visible viewport"
+  assert_not_contains "$(cat "$log")" "recent" \
+    "a routine capture asked herdr for history, which scrolls an idle agent's screen"
+  assert_not_contains "$(cat "$log")" "--lines" \
+    "a routine capture passed a line count to herdr"
+  pass "fm_backend_herdr_capture: a request larger than the viewport reads only '--source visible', never history"
 }
 
-test_capture_works_around_small_lines_bug() {
+test_capture_trims_a_small_request_locally() {
   local dir log resp fb out
-  # Verified herdr v0.7.1 bug (herdr-verification-p2.md): `pane read --lines N`
-  # for a small N (below the pane's viewport height) returns EMPTY, not the
-  # last N lines. The adapter must never ask herdr for a small --lines bound -
-  # it always fetches >= 200 and trims locally with tail.
   dir="$TMP_ROOT/capture-small"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf 'a\nb\nc\nd\ne\n' > "$resp/1.out"
+  printf 'a\nb\nc\nd\ne\n\n\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" )
-  [ "$out" = $'d\ne' ] || fail "a small --lines request should still return the last N lines (trimmed locally), got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''--lines'$'\x1f''200' \
-    "capture should request a generous fetch (>=200), never the caller's small N, from herdr's own --lines flag"
-  pass "fm_backend_herdr_capture: works around the verified small-N '--lines' bug by over-fetching and trimming locally"
+  [ "$out" = $'d\ne' ] || fail "a small request should return the last N content rows of the viewport, got '$out'"
+  assert_not_contains "$(cat "$log")" "recent" \
+    "a small routine capture asked herdr for history"
+  pass "fm_backend_herdr_capture: a small request is trimmed locally from the visible viewport"
 }
 
 test_capture_preserves_pane_read_failure() {
@@ -3763,9 +3761,159 @@ test_capture_preserves_pane_read_failure() {
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
     "capture did not ensure the herdr server before reading the pane"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible' \
     "capture did not try to read the requested pane"
   pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
+}
+
+# history_capture_read <case> <lines> <pane-get-body>: run the explicit deep
+# read with pane get answering <pane-get-body> and every pane read answering
+# 'row', echoing the fake CLI log.
+history_capture_read() {  # <case> <lines> <pane-get-body>
+  local dir="$TMP_ROOT/history-$1" fb
+  mkdir -p "$dir/responses"; : > "$dir/log"
+  printf '%s\n' "$3" > "$dir/responses/1.out"
+  printf 'row\n' > "$dir/responses/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_history_capture herdr default:w1:p2 "$1"' "$ROOT" "$2" >/dev/null \
+    || fail "the history capture of $2 lines failed"
+  cat "$dir/log"
+}
+
+test_history_capture_reads_history_only_beyond_the_viewport() {
+  local log viewport='{"result":{"pane":{"pane_id":"w1:p2","scroll":{"viewport_rows":40}}}}'
+  log=$(history_capture_read fits 40 "$viewport")
+  assert_contains "$log" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible' \
+    "a deep read that fits the viewport did not use the passive visible read"
+  assert_not_contains "$log" "recent" "a deep read that fits the viewport asked herdr for history"
+  log=$(history_capture_read beyond 120 "$viewport")
+  assert_contains "$log" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''120' \
+    "a deep read beyond the viewport did not read 'recent' history for exactly the requested lines"
+  log=$(history_capture_read unreadable 120 '{"error":{"code":"pane_not_found"}}')
+  assert_not_contains "$log" "recent" "a deep read whose viewport height is unreadable asked herdr for history"
+  pass "fm_backend_history_capture: herdr reads history only for a request beyond the viewport; anything else stays passive"
+}
+
+# self_guard_log <case> <target> <script>: run <script> with herdr.sh sourced
+# as a process whose own pane is default:w1:p2, echoing the fake CLI log and
+# then the script's exit status on the last line.
+self_guard_log() {  # <case> <target> <script>
+  local dir="$TMP_ROOT/self-guard-$1" fb rc=0
+  mkdir -p "$dir/responses"; : > "$dir/log"
+  printf 'row\n' > "$dir/responses/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" HERDR_PANE_ID=w1:p2 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; T=$1; eval "$2"' "$ROOT" "$2" "$3" >/dev/null 2>&1 || rc=$?
+  cat "$dir/log"
+  printf 'rc=%s\n' "$rc"
+}
+
+# shellcheck disable=SC2016 # Each script expands inside self_guard_log's child bash.
+test_self_guard_refuses_the_callers_own_pane() {
+  local log
+  log=$(self_guard_log capture default:w1:p2 'fm_backend_herdr_capture "$T" 40')
+  assert_not_contains "$log" $'\x1f''pane'$'\x1f''read' "a capture of the caller's own pane read it"
+  assert_contains "$log" "rc=1" "a capture of the caller's own pane did not fail"
+  log=$(self_guard_log visible default:w1:p2 'fm_backend_herdr_visible_capture "$T"')
+  assert_not_contains "$log" $'\x1f''pane'$'\x1f''read' "a visible read of the caller's own pane read it"
+  log=$(self_guard_log key default:w1:p2 'fm_backend_herdr_send_key "$T" Escape')
+  assert_not_contains "$log" "send-keys" "a key to the caller's own pane was sent"
+  assert_contains "$log" "rc=1" "a key to the caller's own pane did not fail"
+  log=$(self_guard_log literal default:w1:p2 'fm_backend_herdr_send_literal "$T" /exit')
+  assert_not_contains "$log" "send-text" "text was typed into the caller's own pane"
+  log=$(self_guard_log kill default:w1:p2 'fm_backend_herdr_kill "$T"')
+  assert_not_contains "$log" "close" "the caller's own pane was closed"
+  assert_contains "$log" "rc=1" "a kill of the caller's own pane reported success instead of refusing"
+  log=$(self_guard_log other-session fm-lab-x:w1:p2 'fm_backend_herdr_capture "$T" 40')
+  assert_contains "$log" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' "the same pane id in another herdr session was refused"
+  assert_contains "$log" "rc=0" "a read of the same pane id in another session failed"
+  log=$(self_guard_log other-pane default:w1:p3 'fm_backend_herdr_capture "$T" 40')
+  assert_contains "$log" "rc=0" "a read of another pane in the caller's session failed"
+  pass "fm_backend_herdr self guard: reads, keys, text, and close of the caller's own pane are refused before any herdr call"
+}
+
+# shellcheck disable=SC2016 # Each script expands inside self_guard_log's child bash.
+test_self_guard_uses_the_identity_captured_before_a_caller_reuses_the_name() {
+  local log
+  # bin/fm-spawn.sh assigns HERDR_PANE_ID to the task's pane after sourcing
+  # fm-backend.sh; the guard must keep protecting the process's real pane and
+  # must not refuse the task pane it now names.
+  log=$(self_guard_log reused-real default:w1:p2 'HERDR_PANE_ID=w7:p1; fm_backend_herdr_capture "$T" 40')
+  assert_not_contains "$log" $'\x1f''pane'$'\x1f''read' "the caller's real pane was read after the name was reused"
+  log=$(self_guard_log reused-task default:w7:p1 'HERDR_PANE_ID=w7:p1; fm_backend_herdr_capture "$T" 40')
+  assert_contains "$log" "rc=0" "the task pane that a reused HERDR_PANE_ID names was refused as the caller's own"
+  pass "fm_backend_herdr self guard: uses the pane identity fm-backend.sh captured at source time"
+}
+
+test_self_guard_matches_a_named_session_and_the_supervisor_exception() {
+  local dir="$TMP_ROOT/self-guard-named" fb rc
+  mkdir -p "$dir/responses"; : > "$dir/log"
+  fb=$(make_herdr_fakebin "$dir")
+  rc=0
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" HERDR_PANE_ID=w1:p2 HERDR_SESSION=fm-lab-x \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_capture fm-lab-x:w1:p2 40' "$ROOT" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a named-session pane's own target was not refused"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''pane'$'\x1f''read' "a named-session pane read itself"
+  : > "$dir/log"
+  rc=0
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" HERDR_PANE_ID=w1:p2 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; FM_BACKEND_HERDR_SUPERVISOR_SELF_TARGET=default:w1:p2 fm_backend_herdr_capture default:w1:p2 40' "$ROOT" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "the away-mode daemon's named supervisor-pane read was refused"
+  assert_contains "$(cat "$dir/log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' "the named supervisor-pane read did not reach herdr"
+  pass "fm_backend_herdr self guard: covers named sessions, and admits only the exact supervisor target the daemon names"
+}
+
+test_wait_agent_session_skips_the_previous_agents_registration() {
+  local dir="$TMP_ROOT/wait-agent-session" fb out rc=0
+  local stale='{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"old-1111"}}}}'
+  local fresh='{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"new-2222"}}}}'
+  mkdir -p "$dir/responses"; : > "$dir/log"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$dir/responses/1.out"
+  printf '%s\n' "$stale" > "$dir/responses/2.out"
+  printf '%s\n' "$fresh" > "$dir/responses/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_agent_session default:w1:p2 10 old-1111' "$ROOT")
+  [ "$out" = new-2222 ] || fail "the wait did not skip the previous agent's session for the new one, got '$out'"
+  rm -f "$dir/responses/.count" "$dir/responses/3.out"
+  printf '%s\n' "$stale" > "$dir/responses/3.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_agent_session default:w1:p2 1 old-1111' "$ROOT") || rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail "a pane still carrying only the previous agent's session reported '$out'"
+  rm -f "$dir/responses/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_agent_session default:w1:p2 10' "$ROOT")
+  [ "$out" = old-1111 ] || fail "with nothing stale to skip, the first registered session should be reported, got '$out'"
+  pass "fm_backend_herdr_wait_agent_session: waits past a reused pane's previous registration for the new agent's"
+}
+
+# endpoint_identity_of <case> <recorded> <agent-get-body> [pane-id]: the identity
+# verdict for default:<pane-id> (w1:p2 by default) from a process whose own
+# pane is default:w9:p9.
+endpoint_identity_of() {  # <case> <recorded> <agent-get-body> [pane-id]
+  local dir="$TMP_ROOT/endpoint-identity-$1" fb
+  mkdir -p "$dir/responses"; : > "$dir/log"
+  printf '%s\n' "$3" > "$dir/responses/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" HERDR_PANE_ID=w9:p9 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_endpoint_identity "default:$2" "$1"' "$ROOT" "$2" "${4:-w1:p2}"
+}
+
+test_endpoint_identity_classifies_the_registered_agent_session() {
+  local claude_a='{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"aaaa-1111"}}}}'
+  local claude_b='{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"bbbb-2222"}}}}'
+  [ "$(endpoint_identity_of own aaaa-1111 "$claude_a")" = own ] \
+    || fail "the recorded agent session did not read as this task's own agent"
+  [ "$(endpoint_identity_of foreign aaaa-1111 "$claude_b")" = $'foreign\tbbbb-2222' ] \
+    || fail "a different registered agent session did not read as foreign with its current session"
+  [ "$(endpoint_identity_of unrecorded '' "$claude_b")" = unverified ] \
+    || fail "a task with no recorded agent session claimed a verdict"
+  [ "$(endpoint_identity_of no-agent aaaa-1111 '{"error":{"code":"agent_not_found"}}')" = unverified ] \
+    || fail "a pane with no registered agent claimed a mismatch"
+  [ "$(endpoint_identity_of self aaaa-1111 "$claude_a" w9:p9)" = self ] \
+    || fail "the caller's own pane did not read as self"
+  pass "fm_backend_herdr_endpoint_identity: own, foreign, unverified, and self from the registered agent session"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -5329,7 +5477,9 @@ test_scripts_route_explicit_target_through_meta_backend() {
   neutral="$dir/neutral-root"; mkdir -p "$neutral"
   fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
   touch "$state/.last-watcher-beat"
-  printf 'captured herdr pane\n' > "$resp/1.out"
+  # fm-peek is the explicit deep read: it learns the viewport height first.
+  printf '{"result":{"pane":{"pane_id":"w1:p2","scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
+  printf 'captured herdr pane\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -6011,9 +6161,15 @@ test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
-test_capture_calls_pane_read
-test_capture_works_around_small_lines_bug
+test_capture_reads_only_the_visible_viewport
+test_capture_trims_a_small_request_locally
 test_capture_preserves_pane_read_failure
+test_history_capture_reads_history_only_beyond_the_viewport
+test_self_guard_refuses_the_callers_own_pane
+test_self_guard_uses_the_identity_captured_before_a_caller_reuses_the_name
+test_self_guard_matches_a_named_session_and_the_supervisor_exception
+test_endpoint_identity_classifies_the_registered_agent_session
+test_wait_agent_session_skips_the_previous_agents_registration
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd

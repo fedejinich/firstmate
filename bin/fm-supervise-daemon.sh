@@ -1441,6 +1441,12 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  # The supervisor pane may be the one this daemon runs in. Typing into it is
+  # this function's whole job, so name exactly that target to the herdr
+  # adapter's self-pane guard (fm_backend_herdr_self_guard), scoped to this
+  # call and never to the workers the daemon steers.
+  # shellcheck disable=SC2034 # Read by the herdr adapter's guard through dynamic scope.
+  local FM_BACKEND_HERDR_SUPERVISOR_SELF_TARGET=$target
   fm_backend_target_exists "$backend" "$target" \
     || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; return 1; }
   # (3) Busy-guard: never inject into an in-use supervisor pane.

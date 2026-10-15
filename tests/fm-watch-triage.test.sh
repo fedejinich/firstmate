@@ -3641,6 +3641,95 @@ test_wedge_defer_refuses_a_half_filled_wait_record() {
 }
 
 
+# --- a herdr record that names no worker of its own reports once -------------
+# A worker exited and the captain started his firstmate session in the same herdr
+# pane; the task record still named it, so every cycle read (and, through herdr's
+# history harvest, scrolled) the captain's own session. A record whose pane is the
+# watcher's own, or holds an agent session other than the one its spawn recorded,
+# is reported once and then never read, rung, or stale-checked.
+
+# not_task_agent_case <name> [recorded-session]: a herdr ship record at
+# default:w1:p2 and a herdr stub that logs every call to $dir/herdr.log and
+# answers agent get with the session in $FM_FAKE_HERDR_SESSION.
+not_task_agent_case() {  # <name> [recorded-session]
+  local dir
+  dir=$(make_case "$1")
+  {
+    printf 'window=default:w1:p2\nkind=ship\nharness=claude\nbackend=herdr\n'
+    [ -z "${2:-}" ] || printf 'herdr_agent_session=%s\n' "$2"
+  } > "$dir/state/reused.meta"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
+case "$1 ${2:-}" in
+  "status --json") printf '{"server":{"running":true}}\n' ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"%s"}}}}\n' \
+      "$FM_FAKE_HERDR_SESSION" ;;
+  "pane read") printf 'someone else\n' ;;
+  *) printf '{"result":{}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/herdr"
+  : > "$dir/herdr.log"
+  printf '%s\n' "$dir"
+}
+
+# not_task_agent_round <case-dir> <exit|absorb> [env assignments...]
+not_task_agent_round() {  # <case-dir> <exit|absorb> [env...]
+  local dir=$1 mode=$2 pid cycles=0
+  shift 2
+  env -u FM_BACKEND_HERDR_SELF_PANE -u FM_BACKEND_HERDR_SELF_SESSION -u HERDR_SESSION -u HERDR_PANE_ID \
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_BACKEND_HERDR_EVENTS_FORCE=0 FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$@" "$WATCH" >> "$dir/watch.out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  while [ "$cycles" -lt 3 ]; do
+    wait_poll_cycle "$dir/state" "$pid" 300 || { reap "$pid"; return 1; }
+    cycles=$((cycles + 1))
+  done
+  reap "$pid"
+}
+
+test_herdr_record_naming_another_agent_reports_once_and_is_never_read() {
+  local dir
+  dir=$(not_task_agent_case not-task-agent-foreign aaaa-1111)
+  not_task_agent_round "$dir" exit FM_FAKE_HERDR_SESSION=bbbb-2222 \
+    || fail "a record naming another agent was never reported: $(cat "$dir/watch.out")"
+  grep -F 'now holds another agent (herdr session bbbb-2222, recorded aaaa-1111)' "$dir/watch.out" >/dev/null \
+    || fail "the report did not name both agent sessions: $(cat "$dir/watch.out")"
+  [ "$(wedge_stale_wakes "$dir/state" default:w1:p2)" -eq 1 ] \
+    || fail "the finding queued $(wedge_stale_wakes "$dir/state" default:w1:p2) wakes instead of one"
+  ack_stopped_cycle "$dir/state" || fail "could not acknowledge the report"
+  : > "$dir/watch.out"
+  not_task_agent_round "$dir" absorb FM_FAKE_HERDR_SESSION=bbbb-2222 \
+    || fail "an unchanged finding re-alarmed: $(cat "$dir/watch.out")"
+  [ "$(wedge_stale_wakes "$dir/state" default:w1:p2)" -eq 0 ] \
+    || fail "an unchanged finding queued a repeat wake"
+  if grep -E '^pane (read|send-text|send-keys|run)' "$dir/herdr.log" >/dev/null; then
+    fail "the watcher read or typed into another agent's pane: $(grep -E '^pane' "$dir/herdr.log")"
+  fi
+  pass "a herdr record whose pane holds another agent session is reported once and never read"
+}
+
+test_herdr_record_naming_the_watchers_own_pane_reports_once() {
+  local dir
+  dir=$(not_task_agent_case not-task-agent-self)
+  not_task_agent_round "$dir" exit FM_FAKE_HERDR_SESSION=cccc-3333 HERDR_PANE_ID=w1:p2 \
+    || fail "a record naming the watcher's own pane was never reported: $(cat "$dir/watch.out")"
+  grep -F "is this firstmate session's own pane" "$dir/watch.out" >/dev/null \
+    || fail "the report did not say the record names the firstmate session: $(cat "$dir/watch.out")"
+  if grep -E '^pane (read|send-text|send-keys|run)' "$dir/herdr.log" >/dev/null; then
+    fail "the watcher read or typed into its own session's pane: $(grep -E '^pane' "$dir/herdr.log")"
+  fi
+  pass "a herdr record naming the firstmate session's own pane is reported once and never read"
+}
+
 # --- a record whose agent is GONE reports once, instead of alarming forever ---
 # Observed on a live fleet: two finished lanes reached 226 and 203 CONSECUTIVE
 # wedge escalations, one alarm roughly every FM_STALE_ESCALATE_SECS, indefinitely -
@@ -6678,6 +6767,8 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_herdr_record_naming_another_agent_reports_once_and_is_never_read
+test_herdr_record_naming_the_watchers_own_pane_reports_once
 test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
 test_gone_report_rearms_when_the_endpoint_comes_back

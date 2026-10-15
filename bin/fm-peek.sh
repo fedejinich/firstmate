@@ -8,6 +8,9 @@
 # capture (fm-remote-secondmate-control.sh), clamped to that command's
 # 100-line cap. An unreachable host or unreadable endpoint fails loudly naming
 # the host; the local backend adapters are never asked to read a remote target.
+# This is the explicit deep read (fm_backend_history_capture): on herdr, a line
+# count above the pane's viewport reads history and may briefly scroll an idle
+# agent's screen, which routine supervision reads never do.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,4 +46,4 @@ T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 
-fm_backend_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"
+fm_backend_history_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"

@@ -32,8 +32,10 @@ HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Call this before exporting the lab HERDR_SESSION in any suite whose subject is
 # the per-home container path. A suite that means to exercise a launcher-bound
 # spawn sets HERDR_PANE_ID itself, to a pane it created in its own lab session.
+# The identity bin/fm-backend.sh captured from an ancestor is dropped with it.
 herdr_forget_inherited_pane() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+  unset FM_BACKEND_HERDR_SELF_PANE FM_BACKEND_HERDR_SELF_SESSION
 }
 
 herdr_refuse_if_default() { # <session>
