@@ -3263,7 +3263,7 @@ fm_backend_herdr_viewport_rows() {  # <session> <pane>
 }
 
 # fm_backend_herdr_history_capture: the EXPLICIT deep read, reachable only
-# through fm_backend_history_capture (an operator's fm-peek). A request that
+# through fm_backend_history_capture (an operator's fm-peek --deep). A request that
 # fits the viewport is served by the passive routine capture above; only one
 # asking for more rows than the viewport holds reads `--source recent`, which
 # may scroll an idle alternate-screen agent and back while herdr harvests its

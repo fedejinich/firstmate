@@ -5470,6 +5470,39 @@ test_dispatch_composer_state_routes_by_backend() {
   pass "fm_backend_composer_state dispatches every backend to its named thin classifier, unknown for unrecognized backends"
 }
 
+# fm-peek's default read is passive like every routine read; only --deep may
+# reach the history read, and only beyond the viewport. A record naming another
+# agent is refused before anything is read.
+test_fm_peek_is_passive_unless_deep_and_refuses_another_agent() {
+  local dir state resp fb out rc=0
+  dir="$TMP_ROOT/peek-deep"; state="$dir/state"; resp="$dir/responses"
+  mkdir -p "$state" "$resp"; : > "$dir/log"
+  fm_write_meta "$state/pk.meta" "window=default:w1:p2" "backend=herdr" "herdr_agent_session=aaaa-1111"
+  touch "$state/.last-watcher-beat"
+  fb=$(make_herdr_fakebin "$dir")
+  peek() { PATH="$fb:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$resp" "$ROOT/bin/fm-peek.sh" "$@"; }
+  local own='{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"aaaa-1111"}}}}'
+  printf '%s\n' "$own" > "$resp/1.out"
+  printf 'row\n' > "$resp/2.out"
+  out=$(peek pk 120 2>&1) || fail "a default fm-peek failed: $out"
+  assert_not_contains "$(cat "$dir/log")" "recent" "a default fm-peek beyond the viewport read history"
+  rm -rf "$resp"; mkdir -p "$resp"; : > "$dir/log"
+  printf '%s\n' "$own" > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","scroll":{"viewport_rows":40}}}}\n' > "$resp/2.out"
+  printf 'row\n' > "$resp/3.out"
+  out=$(peek pk 120 --deep 2>&1) || fail "fm-peek --deep failed: $out"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''120' \
+    "fm-peek --deep beyond the viewport did not read history"
+  rm -rf "$resp"; mkdir -p "$resp"; : > "$dir/log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"bbbb-2222"}}}}\n' > "$resp/1.out"
+  out=$(peek pk 40 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-peek read a pane holding another agent: $out"
+  assert_contains "$out" "now holds another agent" "the fm-peek refusal should say another agent holds the pane"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''pane'$'\x1f''read' "a refused fm-peek still read the pane"
+  pass "fm-peek: passive by default, history only with --deep, and refuses a pane holding another agent"
+}
+
 test_scripts_route_explicit_target_through_meta_backend() {
   local dir state log resp fb neutral out
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
@@ -5477,9 +5510,7 @@ test_scripts_route_explicit_target_through_meta_backend() {
   neutral="$dir/neutral-root"; mkdir -p "$neutral"
   fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
   touch "$state/.last-watcher-beat"
-  # fm-peek is the explicit deep read: it learns the viewport height first.
-  printf '{"result":{"pane":{"pane_id":"w1:p2","scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
-  printf 'captured herdr pane\n' > "$resp/2.out"
+  printf 'captured herdr pane\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -6252,6 +6283,7 @@ test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
+test_fm_peek_is_passive_unless_deep_and_refuses_another_agent
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
 test_apply_transition_blocked_requires_commit_to_dedupe

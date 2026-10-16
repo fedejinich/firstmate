@@ -1256,9 +1256,9 @@ Observed 2026-10-15:
 
 ```text
 ok - live Herdr passive reads: Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 receives zero wheel events from routine reads, which still see its idle composer, idle footer, and an unsubmitted doorbell
-ok - live Herdr deep read: Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 returns 165 rows of history beyond its 40-row viewport, and Herdr wrote 133 wheel events harvesting them
+ok - live Herdr deep read: fm-peek --deep of Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 returns 165 rows of history beyond its 40-row viewport, and Herdr wrote 135 wheel events harvesting them
 ok - live Herdr self guard: a read of the caller's own pane is refused
-ok - live Herdr endpoint identity: a second Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 in the same pane registers a new session within 1s and reads as foreign
+ok - live Herdr endpoint identity: a second Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 in the same pane registers a new session within 2s and reads as foreign
 ```
 
 The portable regressions are in `tests/fm-backend-herdr.test.sh`, `tests/fm-crew-state.test.sh`, `tests/fm-control.test.sh`, and `tests/fm-watch-triage.test.sh`; [`herdr-backend.md`](../herdr-backend.md#passive-pane-reads) owns the contract.

@@ -8,11 +8,12 @@
 # guard runs real Claude Code behind a pty logger deliberately named `claude`
 # (Herdr's agent detection keys on that name) in an isolated Herdr lab and
 # requires:
-#   - every routine read (fm_backend_capture, at and above the viewport, plus the
-#     composer, rendered busy, and steering-inbox doorbell reads) writes zero
+#   - every routine read (fm_backend_capture and a default fm-peek, at and above
+#     the viewport, plus the composer, rendered busy, and steering-inbox doorbell
+#     reads) writes zero
 #     wheel events and still sees Claude's idle composer, idle footer, and an
 #     unsubmitted doorbell line;
-#   - the explicit deep read (fm_backend_history_capture) beyond the viewport
+#   - the explicit deep read (fm-peek --deep) beyond the viewport
 #     still returns history, and does harvest, so the zero above is not vacuous;
 #   - Claude's registered agent session is readable within the spawn's recording
 #     budget, and a second Claude in the same pane registers a new one within it
@@ -191,7 +192,7 @@ wait_idle_composer() {
     i=$((i + 1))
     sleep 1
   done
-  fail "$WHO never rendered an idle composer in the lab pane"
+  fail "$WHO never rendered an idle composer in the lab pane; its screen was:"$'\n'"$(printf '%s\n' "$screen" | grep -v '^[[:space:]]*$' | tail -12)"
 }
 
 # --- 1. a transcript taller than the viewport, then an idle agent ------------
@@ -220,11 +221,19 @@ done
 sleep 2
 ROWS=$(fm_backend_herdr_viewport_rows "$SESSION" "$PANE") || fail "could not read the lab pane's viewport height"
 CHECKED=0
+# An operator's fm-peek of the pane, through a task record in a scratch home.
+PEEK_HOME="$TMP_ROOT/home"
+mkdir -p "$PEEK_HOME/state"
+printf 'window=%s\nbackend=herdr\nherdr_agent_session=%s\n' "$TARGET" "$FIRST_SESSION" > "$PEEK_HOME/state/peeklab.meta"
+peek() { FM_HOME="$PEEK_HOME" FM_STATE_OVERRIDE="$PEEK_HOME/state" "$ROOT/bin/fm-peek.sh" peeklab "$@" 2>/dev/null; }
 
 # --- 2. routine reads write nothing into the pane ----------------------------
 before=$(wheel_events)
 small=$(fm_backend_capture herdr "$TARGET" 40) || fail "$WHO: a routine 40-line capture failed"
 large=$(fm_backend_capture herdr "$TARGET" 500) || fail "$WHO: a routine capture larger than the viewport failed"
+peeked=$(peek 120) || fail "$WHO: a default fm-peek beyond the viewport failed"
+[ "$(printf '%s\n' "$peeked" | wc -l | tr -d '[:space:]')" -le "$ROWS" ] \
+  || fail "$WHO: a default fm-peek returned more rows than the ${ROWS}-row viewport, so it read history"
 composer=$(fm_backend_composer_state herdr "$TARGET")
 footer=$(fm_backend_herdr_rendered_busy_state "$TARGET" claude)
 sleep 2
@@ -255,7 +264,7 @@ pass "live Herdr passive reads: $WHO receives zero wheel events from routine rea
 
 # --- 3. the explicit deep read still returns history -------------------------
 before=$(wheel_events)
-deep=$(fm_backend_history_capture herdr "$TARGET" 200) || fail "$WHO: the deep history read failed"
+deep=$(peek 200 --deep) || fail "$WHO: the fm-peek --deep history read failed"
 sleep 2
 after=$(wheel_events)
 deep_rows=$(printf '%s\n' "$deep" | wc -l | tr -d '[:space:]')
@@ -263,7 +272,7 @@ deep_rows=$(printf '%s\n' "$deep" | wc -l | tr -d '[:space:]')
   || fail "$WHO: the deep read returned $deep_rows rows, not more than the ${ROWS}-row viewport"
 [ "$after" -gt "$before" ] \
   || fail "$WHO: the deep read wrote no wheel events, so the zero above proves nothing on this Herdr"
-pass "live Herdr deep read: $WHO returns $deep_rows rows of history beyond its ${ROWS}-row viewport, and Herdr wrote $((after - before)) wheel events harvesting them"
+pass "live Herdr deep read: fm-peek --deep of $WHO returns $deep_rows rows of history beyond its ${ROWS}-row viewport, and Herdr wrote $((after - before)) wheel events harvesting them"
 
 # --- 4. the caller's own pane is refused ------------------------------------
 own=$(FM_BACKEND_HERDR_SELF_PANE=$PANE FM_BACKEND_HERDR_SELF_SESSION=$SESSION fm_backend_capture herdr "$TARGET" 40 2>&1) \

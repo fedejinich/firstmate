@@ -8,7 +8,7 @@
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
-#   fm-remote-secondmate-control.sh capture <id> [lines]
+#   fm-remote-secondmate-control.sh capture <id> [lines] [--deep]
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
@@ -117,6 +117,21 @@ remote_endpoint_load() {
 
 remote_endpoint_require() {
   remote_endpoint_load "$1" || die "$REMOTE_ENDPOINT_ERROR"
+}
+
+# remote_endpoint_not_worker: 0, with REMOTE_ENDPOINT_ERROR set, when the loaded
+# endpoint no longer holds this mate's own agent (bin/fm-backend.sh's
+# fm_backend_endpoint_not_task_agent), so nothing may read, ring, or steer it.
+# Call after remote_endpoint_load.
+remote_endpoint_not_worker() {  # <id>
+  local finding
+  finding=$(fm_backend_endpoint_not_task_agent "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META") || return 1
+  REMOTE_ENDPOINT_ERROR="remote secondmate $1: ${finding#*$'\t'}; refusing to read, ring, or steer it"
+}
+
+remote_endpoint_require_worker() {  # <id>
+  remote_endpoint_require "$1"
+  ! remote_endpoint_not_worker "$1" || die "$REMOTE_ENDPOINT_ERROR"
 }
 
 state_value() { # <id>; prints recovery-grade state
@@ -277,7 +292,7 @@ cmd_send() {
   meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
   fm_task_inbox_lock_acquire "$meta_lock" \
     || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
-  if ! remote_endpoint_load "$id"; then
+  if ! remote_endpoint_load "$id" || remote_endpoint_not_worker "$id"; then
     fm_lock_release "$meta_lock"
     die "$REMOTE_ENDPOINT_ERROR"
   fi
@@ -315,19 +330,26 @@ cmd_key() {
   local id=$1 key=$2
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  remote_endpoint_require_worker "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key"
 }
 
+# A capture is the passive visible read unless --deep explicitly asks for the
+# history read (fm_backend_history_capture), as bin/fm-peek.sh forwards it.
 cmd_capture() {
-  local id=$1 lines=${2:-20}
+  local id=$1 lines=${2:-20} deep=${3:-}
   validate_id "$id"
   validate_home "$id"
   case "$lines" in ''|*[!0-9]*|0) die "capture line count must be positive" ;; esac
   [ "$lines" -le 100 ] || die "capture line count exceeds 100"
-  remote_endpoint_require "$id"
-  fm_backend_history_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
+  case "$deep" in ''|--deep) ;; *) usage ;; esac
+  remote_endpoint_require_worker "$id"
+  if [ "$deep" = --deep ]; then
+    fm_backend_history_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
+  else
+    fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
+  fi
 }
 
 cmd_observe() {
@@ -335,6 +357,11 @@ cmd_observe() {
   validate_id "$id"
   validate_home "$id"
   remote_endpoint_require "$id"
+  if remote_endpoint_not_worker "$id"; then
+    printf 'error: %s\n' "$REMOTE_ENDPOINT_ERROR" >&2
+    printf 'unknown\n'
+    return 0
+  fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
@@ -441,7 +468,7 @@ case "${1:-}" in
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
-  capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
+  capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 3 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;

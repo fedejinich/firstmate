@@ -806,7 +806,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 # fm_backend_history_capture: the explicit deep read for an operator asking to
-# see more than a routine tail (bin/fm-peek.sh). Herdr routes it to its history
+# see more than a routine tail (bin/fm-peek.sh --deep). Herdr routes it to its history
 # read, which may scroll an idle agent's screen and back when the request
 # exceeds the viewport (fm_backend_herdr_history_capture); every other backend's
 # routine capture already includes scrollback, so it is the same read there.
