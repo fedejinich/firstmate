@@ -58,6 +58,11 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          A window whose task record names the firstmate
+#                          session's own pane, or an agent other than the one
+#                          the task spawned, is reported ONCE with that finding
+#                          and then never read, rung, or stale-checked
+#                          (endpoint_not_task_agent_check).
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -954,7 +959,7 @@ secondmate_ring_to_drain() {  # <task> <window>
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker progress_marker ring_marker progress observed_at observed_key
-  local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w
+  local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w not_task_agent
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -1015,13 +1020,17 @@ EOF
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
-    ! secondmate_in_active_turn "$w" "$idle" || continue
+    # A pane that no longer holds the mate's own agent is neither observed nor
+    # rung; its stalled queue goes straight to the parent alarm below.
+    not_task_agent=0
+    fm_backend_endpoint_not_task_agent "$(fm_backend_of_meta "$meta")" "$w" "$meta" >/dev/null && not_task_agent=1
+    [ "$not_task_agent" = 1 ] || ! secondmate_in_active_turn "$w" "$idle" || continue
     already_rung=0
     if [ -e "$ring_marker" ] || [ -L "$ring_marker" ]; then
       [ -f "$ring_marker" ] && [ ! -L "$ring_marker" ] || return 1
       [ "$(cat "$ring_marker" 2>/dev/null || true)" = "$row_key" ] && already_rung=1
     fi
-    if [ "$already_rung" -eq 0 ] && secondmate_idle_ring_safe "$w"; then
+    if [ "$already_rung" -eq 0 ] && [ "$not_task_agent" = 0 ] && secondmate_idle_ring_safe "$w"; then
       if secondmate_ring_to_drain "$task" "$w"; then
         fm_wake_secondmate_ring_marker_write "$task" "$row_key" || return 1
         fm_wake_secondmate_progress_marker_write "$task" "$now" "$row_key" || return 1
@@ -1497,6 +1506,33 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s %s' "$agent_state" "$id" > "$marker"
   clear_write_tracking "$key"
+  wake "$reason"
+}
+
+# endpoint_not_task_agent_check: 0 when <window>'s task record names no worker
+# of its own - the firstmate session's own pane, or an agent other than the one
+# the task spawned (bin/fm-backend.sh's fm_backend_endpoint_not_task_agent) -
+# after raising one wake that says so; the caller then skips every pane read,
+# doorbell ring, and stale check for that window, because its screen belongs to
+# someone else. 1 when the endpoint is still the task's, or cannot be compared.
+# The marker holds the finding itself, so the same finding is reported once,
+# a different one (another agent, or the session moving in) is reported again,
+# and a cleared one re-arms.
+endpoint_not_task_agent_check() {  # <window> <task>
+  local win=$1 task=$2 marker finding reason
+  marker="$STATE/.not-task-agent-$(window_key "$win")"
+  if ! finding=$(fm_backend_endpoint_not_task_agent "$(window_backend "$win")" "$win" "$STATE/$task.meta"); then
+    rm -f "$marker"
+    return 1
+  fi
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$finding" ]; then
+    return 0
+  fi
+  reason="stale: $win (${finding#*$'\t'}; firstmate no longer reads, rings, or steers it and reports this once - reconcile this record, and check for unlanded work before any cleanup)"
+  # Append before the marker, as wedge_dead_record does, so a failed append is
+  # retried rather than absorbed.
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$finding" > "$marker"
   wake "$reason"
 }
 
@@ -3050,6 +3086,11 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    # A record naming the firstmate session's own pane, or another agent, is
+    # reported once and then never read, rung, or stale-checked.
+    if [ -n "$task" ] && endpoint_not_task_agent_check "$w" "$task"; then
+      continue
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"

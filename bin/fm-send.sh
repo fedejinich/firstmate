@@ -443,6 +443,14 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 
+# A task record whose endpoint is this firstmate session itself, or now holds
+# another agent, is refused before anything is recorded, rung, or typed.
+if [ -n "$TARGET_META" ] \
+  && NOT_TASK_AGENT=$(fm_backend_endpoint_not_task_agent "$TARGET_BACKEND" "$T" "$TARGET_META"); then
+  echo "error: ${NOT_TASK_AGENT#*$'\t'}; refusing to steer it - reconcile the task record instead" >&2
+  exit 1
+fi
+
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
 # lease. A home with no supervision branch has no lease files and passes

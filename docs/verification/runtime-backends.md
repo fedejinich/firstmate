@@ -1137,7 +1137,7 @@ The CLI matrix was checked directly:
 | Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
-| Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
+| Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height, and N above it writes mouse-wheel input into an idle alternate-screen agent's pane (see "Passive reads and endpoint identity" below), so routine reads use `--source visible`. |
 | Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
 | Styled viewport capture | `herdr pane read <pane> --source visible --format ansi` | Verified on 2026-09-26 against Herdr 0.9.0 with Claude Code 2.1.283: the flag pair exited 0 and returned the viewport with SGR attributes intact, which is the styled read behind `fm_backend_herdr_visible_capture_ansi` that ghost/placeholder stripping needs (see "Claude exit behind the slash-command popup" below). |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
@@ -1228,6 +1228,40 @@ Observed 2026-08-19:
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
+
+### Passive reads and endpoint identity
+
+Measured 2026-10-15 against Herdr 0.9.1 and Claude Code 2.1.301 on macOS aarch64 in isolated `fm-lab-` sessions, with every byte written into the Claude pane logged by a pty wrapper named `claude` (Herdr's agent detection keys on that name).
+
+With an idle Claude holding a 300-line transcript in a 40-row viewport, one read each wrote these wheel events (`ESC[<64;x;yM` up, `ESC[<65;x;yM` down) into the pane:
+
+| Read | Lines returned | Wheel events |
+| --- | --- | --- |
+| `herdr pane read <pane> --source visible` | 40 | 0 |
+| `herdr pane read <pane> --source visible --format ansi` | 39 | 0 |
+| `herdr pane read <pane> --source recent --lines 30` | 30 | 0 |
+| `herdr pane read <pane> --source recent --lines 200` | 200 | 108 |
+
+Pane environment: a pane in a named session carries `HERDR_SESSION=<name>`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, and `HERDR_SOCKET_PATH`; a default-session pane carries the same set without `HERDR_SESSION`.
+`herdr pane get <pane>` reports `.result.pane.scroll.viewport_rows`.
+`herdr agent get <pane>` reports Claude's session as `.result.agent.agent_session` with `kind: "id"` and `source: "herdr:claude"` about a second after Claude clears its folder-trust prompt, and a pane whose Claude exited keeps reporting that session until a new Claude's registration replaces it.
+
+Refresh with:
+
+```sh
+FM_HERDR_PASSIVE_READ_LIVE=1 tests/fm-herdr-passive-read-live-e2e.test.sh
+```
+
+Observed 2026-10-15:
+
+```text
+ok - live Herdr passive reads: Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 receives zero wheel events from routine reads, which still see its idle composer, idle footer, and an unsubmitted doorbell
+ok - live Herdr deep read: fm-peek --deep of Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 returns 165 rows of history beyond its 40-row viewport, and Herdr wrote 135 wheel events harvesting them
+ok - live Herdr self guard: a read of the caller's own pane is refused
+ok - live Herdr endpoint identity: a second Claude Code (2.1.301 (Claude Code)) on herdr 0.9.1 in the same pane registers a new session within 2s and reads as foreign
+```
+
+The portable regressions are in `tests/fm-backend-herdr.test.sh`, `tests/fm-crew-state.test.sh`, `tests/fm-control.test.sh`, and `tests/fm-watch-triage.test.sh`; [`herdr-backend.md`](../herdr-backend.md#passive-pane-reads) owns the contract.
 
 ### Claude exit behind the slash-command popup
 

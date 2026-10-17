@@ -356,6 +356,11 @@ fi
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
+# A record whose endpoint is the firstmate session itself, or now holds another
+# agent, names no worker this plane may interrupt, exit, or relaunch into.
+if NOT_TASK_AGENT=$(fm_backend_endpoint_not_task_agent "$BACKEND" "$T" "$META"); then
+  die "task $ID: ${NOT_TASK_AGENT#*$'\t'}; refusing every lifecycle action on it - reconcile the task record instead"
+fi
 LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)

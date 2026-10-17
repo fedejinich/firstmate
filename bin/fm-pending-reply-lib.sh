@@ -1655,6 +1655,10 @@ fm_pending_reply_tick() {  # <state-dir>
             observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+          elif fm_backend_endpoint_not_task_agent "$backend" "$target" "$meta" >/dev/null; then
+            # Another agent's screen, or this session's own, says nothing about
+            # whether the task's agent has replied.
+            observation=unknown
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi

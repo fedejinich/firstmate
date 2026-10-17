@@ -437,6 +437,45 @@ test_remote_send_revalidates_after_retirement_lock() {
   pass "remote control: send revalidates endpoint ownership under the metadata lock"
 }
 
+# A remote mate whose recorded pane now holds an agent session other than the
+# one its spawn recorded is not that mate: the host-local leg refuses to record,
+# ring, or read anything, and its busy observation reads unknown.
+test_remote_leg_refuses_a_pane_holding_another_agent() {
+  local dir rhome fb rc out
+  dir="$TMP_ROOT/remote-foreign-agent"; mkdir -p "$dir/fakebin"; fb="$dir/fakebin"
+  rhome=$(setup_remote_secondmate_home remote-foreign-agent)
+  printf 'herdr_agent_session=aaaa-1111\n' >> "$rhome/state/parent-route/rsm.meta"
+  : > "$dir/herdr.log"
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/herdr.log"
+case "\$1 \${2:-}" in
+  "status --json") printf '{"server":{"running":true}}\n' ;;
+  "agent get") printf '{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"bbbb-2222"}}}}\n' ;;
+  *) printf '{"result":{}}\n' ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  rc=0
+  out=$(env -u FM_BACKEND_HERDR_SELF_PANE -u HERDR_PANE_ID PATH="$fb:$PATH" FM_HOME="$rhome" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" send rsm "steer to the wrong agent" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a remote steer to a pane holding another agent was accepted: $out"
+  assert_contains "$out" "now holds another agent (herdr session bbbb-2222, recorded aaaa-1111)" \
+    "the remote steer refusal should name both agent sessions"
+  [ -z "$(remote_inbox_records "$rhome")" ] || fail "a refused remote steer recorded a message"
+  rc=0
+  out=$(env -u FM_BACKEND_HERDR_SELF_PANE -u HERDR_PANE_ID PATH="$fb:$PATH" FM_HOME="$rhome" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" capture rsm 20 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a remote capture of a pane holding another agent was accepted: $out"
+  out=$(env -u FM_BACKEND_HERDR_SELF_PANE -u HERDR_PANE_ID PATH="$fb:$PATH" FM_HOME="$rhome" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" observe rsm 2>/dev/null)
+  [ "$out" = unknown ] || fail "another agent's pane was observed as the mate's busy state: '$out'"
+  if grep -E '^pane (read|send-text|send-keys|run)' "$dir/herdr.log" >/dev/null; then
+    fail "the remote leg read or typed into another agent's pane: $(grep -E '^pane' "$dir/herdr.log")"
+  fi
+  pass "remote control: a mate pane holding another agent refuses steer and capture, and observes unknown"
+}
+
 test_remote_send_revalidates_parent_route_after_retirement_lock() {
   local dir fb ssh_log home rhome meta lock ready release rc sender_pid holder_pid
   dir="$TMP_ROOT/remote-parent-retire-race"; mkdir -p "$dir"
@@ -791,6 +830,7 @@ test_remote_retry_failure_preserves_ambiguous_expectation
 test_remote_fire_and_forget_never_arms_reply_recovery
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
+test_remote_leg_refuses_a_pane_holding_another_agent
 test_remote_expected_host_revalidates_final_route
 test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox

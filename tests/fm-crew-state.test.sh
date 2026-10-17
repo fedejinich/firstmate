@@ -270,6 +270,11 @@ case "${1:-}" in
           exit 0
         fi
         [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] || exit 1
+        if [ -n "${FM_FAKE_HERDR_AGENT_SESSION:-}" ]; then
+          printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","agent_session":{"kind":"id","value":"%s"}}}}\n' \
+            "$FM_FAKE_HERDR_AGENT_STATUS" "$FM_FAKE_HERDR_AGENT_SESSION"
+          exit 0
+        fi
         printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
         exit 0 ;;
     esac ;;
@@ -332,6 +337,7 @@ reset_fakes() {
   FM_FAKE_HERDR_READ_FAIL=0
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_AGENT_SESSION=""
   FM_FAKE_HERDR_PROCESS=agent
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
@@ -353,7 +359,7 @@ reset_fakes() {
   FM_FAKE_GERRIT_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_AGENT_SESSION FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
@@ -2560,6 +2566,53 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   assert_contains "$out" "source: pane" "herdr native busy -> pane source"
   assert_contains "$out" "herdr-native" "the herdr verdict names its native source"
   pass "herdr's native busy verdict reads working with no record present"
+}
+
+# A herdr endpoint whose registered agent session differs from the one the
+# task's spawn recorded holds another agent - here a busy one, which would
+# otherwise read as this task working - so it must not read as this task's.
+# The same record with a matching session keeps reading working.
+test_no_run_herdr_foreign_agent_is_not_this_task() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr foreign-agent fallback skipped without jq"; return; }
+  reset_fakes
+  local d out; d=$(new_case herdr-foreign)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-foreign
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-foreign.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude" "herdr_agent_session=aaaa-1111"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_AGENT_SESSION=bbbb-2222
+  out=$(run_crew_state "$d" feat-herdr-foreign)
+  assert_contains "$out" "state: unknown" "another agent's busy pane must not read as this task working"
+  assert_contains "$out" "source: none" "another agent's pane is no state source for this task"
+  assert_contains "$out" "not this task's agent" "the foreign verdict must say the agent is not this task's"
+  assert_contains "$out" "bbbb-2222" "the foreign verdict must name the session now in the pane"
+  FM_FAKE_HERDR_AGENT_SESSION=aaaa-1111
+  out=$(run_crew_state "$d" feat-herdr-foreign)
+  assert_contains "$out" "state: working" "the task's own recorded agent session must still read working"
+  pass "a herdr pane holding an agent session other than the recorded one is not this task's agent"
+}
+
+# A record naming the pane the reading firstmate session itself runs in is not a
+# worker, whatever runs there.
+test_no_run_herdr_own_session_pane_is_not_a_worker() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr self-pane fallback skipped without jq"; return; }
+  reset_fakes
+  local d out; d=$(new_case herdr-self)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-self
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-self.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  out=$(env -u FM_BACKEND_HERDR_SELF_PANE -u FM_BACKEND_HERDR_SELF_SESSION -u HERDR_SESSION HERDR_PANE_ID=w1:p2 \
+    PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-herdr-self)
+  assert_contains "$out" "state: unknown" "the firstmate session's own pane must not read as this task working"
+  assert_contains "$out" "own pane" "the verdict must say the record names the firstmate session's own pane"
+  pass "a herdr record naming the firstmate session's own pane is not a worker"
 }
 
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
@@ -5584,6 +5637,8 @@ test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
+test_no_run_herdr_foreign_agent_is_not_this_task
+test_no_run_herdr_own_session_pane_is_not_a_worker
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record

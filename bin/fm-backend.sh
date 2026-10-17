@@ -55,6 +55,17 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# The herdr pane this process runs in, captured before any caller reuses the
+# HERDR_* names (bin/fm-spawn.sh assigns HERDR_PANE_ID to the task's pane) and
+# exported so a child keeps its parent's own identity; an inherited empty one
+# carries nothing, so the child reads its own.
+# bin/backends/herdr.sh's fm_backend_herdr_target_is_self is the one reader.
+if [ -z "${FM_BACKEND_HERDR_SELF_PANE:-}" ]; then
+  FM_BACKEND_HERDR_SELF_PANE=${HERDR_PANE_ID:-}
+  FM_BACKEND_HERDR_SELF_SESSION=${HERDR_SESSION:-}
+fi
+export FM_BACKEND_HERDR_SELF_PANE FM_BACKEND_HERDR_SELF_SESSION
+
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
 # section 4's harness-verification discipline. herdr is verified (P2;
@@ -552,6 +563,34 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   return 0
 }
 
+# fm_backend_endpoint_not_task_agent: the one check that a task record's live
+# endpoint still holds that task's agent, shared by lifecycle control
+# (bin/fm-control.sh), steering (bin/fm-send.sh), current-state reads
+# (bin/fm-crew-state.sh), and the watcher's one-time wake (bin/fm-watch.sh).
+# Returns 0 and prints "<verdict>\t<sentence>" when it does NOT:
+#   self    - the endpoint is the calling firstmate session's own pane.
+#   foreign - the endpoint holds an agent whose herdr session differs from the
+#             herdr_agent_session the spawn recorded.
+# Returns 1 otherwise, including when nothing can be compared.
+# Only herdr records the identity this needs (fm_backend_herdr_endpoint_identity).
+fm_backend_endpoint_not_task_agent() {  # <backend> <target> <meta-file>
+  local backend=$1 target=$2 meta=$3 recorded identity
+  [ "$backend" = herdr ] && [ -n "$target" ] || return 1
+  fm_backend_source herdr || return 1
+  recorded=$(fm_meta_get "$meta" herdr_agent_session)
+  identity=$(fm_backend_herdr_endpoint_identity "$target" "$recorded")
+  case "$identity" in
+    self)
+      printf 'self\tthe task record'"'"'s endpoint %s is this firstmate session'"'"'s own pane, not a worker' "$target"
+      ;;
+    foreign$'\t'*)
+      printf 'foreign\tthe task record'"'"'s endpoint %s now holds another agent (herdr session %s, recorded %s), not this task'"'"'s worker' \
+        "$target" "${identity#*$'\t'}" "$recorded"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_meta_for_window() {  # <target> <state-dir>
   local target=$1 state=$2 meta window terminal
   for meta in "$state"/*.meta; do
@@ -748,7 +787,10 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 # at every call site. Each verified backend adds its own arm here, without
 # changing call sites.
 
-# fm_backend_capture: bounded plain-text session capture.
+# fm_backend_capture: bounded plain-text session capture for routine reads.
+# It must stay passive: on herdr it reads only the visible viewport, because a
+# history read can scroll an idle agent's own screen
+# (fm_backend_herdr_capture).
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   local backend=$1
   shift
@@ -760,6 +802,23 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_history_capture: the explicit deep read for an operator asking to
+# see more than a routine tail (bin/fm-peek.sh --deep). Herdr routes it to its history
+# read, which may scroll an idle agent's screen and back when the request
+# exceeds the viewport (fm_backend_herdr_history_capture); every other backend's
+# routine capture already includes scrollback, so it is the same read there.
+fm_backend_history_capture() {  # <backend> <target> <lines> [expected-label]
+  local backend=$1
+  shift
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_history_capture "$@"
+      ;;
+    *) fm_backend_capture "$backend" "$@" ;;
   esac
 }
 

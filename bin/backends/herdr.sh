@@ -2348,6 +2348,65 @@ fm_backend_herdr_pane_agent_session_ref() {  # <session> <pane_id>
   printf '%s\t%s' "$agent" "$value"
 }
 
+# fm_backend_herdr_wait_agent_session: the agent session herdr registers in
+# <target> (fm_backend_herdr_pane_agent_session_ref), polled every half second
+# for up to <seconds> while a just-launched agent starts. Prints the session,
+# or returns nonzero when none is registered in time.
+# A pane keeps its previous agent's registration until the new agent's replaces
+# it (verified 0.9.1 with Claude), so a caller launching into a reused pane
+# passes that earlier session as <stale-session> and only a different one is
+# accepted.
+fm_backend_herdr_wait_agent_session() {  # <target> <seconds> [stale-session]
+  local wait=${2:-15} stale=${3:-} deadline identity session
+  case "$wait" in ''|*[!0-9]*) wait=15 ;; esac
+  fm_backend_herdr_parse_target "$1" || return 1
+  deadline=$(( $(date +%s) + wait ))
+  while :; do
+    if identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null); then
+      session=${identity#*$'\t'}
+      case "$session" in
+        ''|*$'\n'*|*$'\r'*|"$stale") ;;
+        *) printf '%s' "$session"; return 0 ;;
+      esac
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 0.5
+  done
+}
+
+# fm_backend_herdr_endpoint_identity: whether <target> still holds the agent a
+# task record was spawned with. Prints exactly one of:
+#   self       - the target is the caller's own pane (fm_backend_herdr_target_is_self).
+#   foreign    - an agent registered there now reports a session other than
+#                <recorded-session>, so it is not the task's agent; followed by
+#                a tab and that current session.
+#   own        - the registered session equals <recorded-session>.
+#   unverified - nothing to compare: no recorded session, or no readable
+#                registration (no agent, an unreadable pane, or a reference
+#                fm_backend_herdr_pane_agent_session_ref does not report).
+# Only self and foreign are findings; unverified never claims a mismatch.
+# <recorded-session> is the task's herdr_agent_session meta value, which
+# bin/fm-spawn.sh records from the same session reference once the launched
+# agent registers.
+fm_backend_herdr_endpoint_identity() {  # <target> [recorded-session]
+  local target=$1 recorded=${2:-} identity current
+  if fm_backend_herdr_target_is_self "$target"; then
+    printf 'self'
+    return 0
+  fi
+  if [ -z "$recorded" ] || ! fm_backend_herdr_parse_target "$target" \
+    || ! identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"); then
+    printf 'unverified'
+    return 0
+  fi
+  current=${identity#*$'\t'}
+  if [ "$current" = "$recorded" ]; then
+    printf 'own'
+  else
+    printf 'foreign\t%s' "$current"
+  fi
+}
+
 # fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
 # confirm; live, stale-agent, and unknown all refuse (1), so an inconclusive
@@ -3047,17 +3106,58 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
+# fm_backend_herdr_target_is_self: 0 when <target> is the herdr pane the
+# calling process itself runs in. The supervisor's watcher, crew-state reads,
+# steers, and lifecycle control all inherit the firstmate session's pane
+# identity, so a task record that names that pane - a reused pane, after the
+# worker exited and the captain started firstmate in it - would otherwise make
+# firstmate read, type into, or exit its own session.
+# The identity is the one bin/fm-backend.sh snapshots at source time
+# (FM_BACKEND_HERDR_SELF_PANE and FM_BACKEND_HERDR_SELF_SESSION), because
+# bin/fm-spawn.sh reuses the HERDR_PANE_ID name for the task's pane; a direct
+# source of this adapter falls back to the live variables.
+# Herdr injects HERDR_SESSION only into named-session panes (verified 0.9.1),
+# so an absent session means the default session, as in
+# fm_backend_herdr_session. Pure: no herdr call.
+fm_backend_herdr_target_is_self() {  # <target>
+  local self_pane self_session
+  self_pane=${FM_BACKEND_HERDR_SELF_PANE-${HERDR_PANE_ID:-}}
+  self_session=${FM_BACKEND_HERDR_SELF_SESSION-${HERDR_SESSION:-}}
+  [ -n "$self_pane" ] || return 1
+  fm_backend_herdr_parse_target "$1" || return 1
+  [ "$FM_BACKEND_HERDR_PANE" = "$self_pane" ] && [ "$FM_BACKEND_HERDR_SESSION" = "${self_session:-default}" ]
+}
+
+# fm_backend_herdr_self_guard: refuse <target> when it is the caller's own pane
+# (fm_backend_herdr_target_is_self), printing the refusal on stderr.
+# Every read and send this adapter makes passes through target readiness or
+# observability, which call this, so no caller can reach its own session by
+# accident.
+# The one sanctioned exception is the away-mode daemon, whose job is to type
+# escalations into the firstmate pane it may itself run in: it names that exact
+# target in FM_BACKEND_HERDR_SUPERVISOR_SELF_TARGET, scoped to its own
+# supervisor-pane calls (bin/fm-supervise-daemon.sh inject_msg), never exported
+# to the workers it steers.
+fm_backend_herdr_self_guard() {  # <target>
+  fm_backend_herdr_target_is_self "$1" || return 0
+  [ "$1" != "${FM_BACKEND_HERDR_SUPERVISOR_SELF_TARGET:-}" ] || return 0
+  echo "REFUSED: herdr target '$1' is this firstmate session's own pane; a task record pointing here does not name a worker, so nothing is read from, typed into, or closed in it" >&2
+  return 1
+}
+
 # fm_backend_herdr_target_observable: verify <target> is well-formed and its
 # recorded session server is currently running, WITHOUT autostarting the server.
 # Passive read-only probes (e.g. composer inspection) must stay observable-only
 # and fail fast on inactive or bad targets without starting a new server.
 fm_backend_herdr_target_observable() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_self_guard "$1" || return 1
   [ "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" = running ]
 }
 
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_self_guard "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
@@ -3129,35 +3229,61 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
-# fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
-# fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
-# is the closest herdr analogue to tmux's scrollback-bounded capture.
+# fm_backend_herdr_capture: the ROUTINE bounded plain-text pane capture behind
+# fm_backend_capture - every watcher, crew-state, busy, composer, and doorbell
+# read. It reads only the visible viewport and trims it to the last <lines>
+# non-trailing-blank rows, so a request larger than the viewport returns the
+# viewport.
 #
-# Verified CLI quirk (herdr-verification-p2.md "pane read --lines bug", v0.7.1):
-# `pane read --source recent --lines N` returns COMPLETELY EMPTY output when N
-# is smaller than the pane's current viewport height (observed threshold ~23
-# rows for a default-sized pane), instead of clamping to the last N lines - it
-# does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (the peek
-# and watch tails, the rendered busy-footer read, and the shared inbox
-# pending-line read; the adapter's own composer reads now take the viewport
-# instead, so they need no line count at all). Workaround:
-# always request a generous fetch far above any realistic viewport height, then
-# trim to the caller's requested bound ourselves with `tail`.
+# It never asks for history, because a history read is not passive: for a
+# pane holding an idle agent in the alternate screen, `pane read --source
+# recent|recent-unwrapped --lines N` with N above the viewport makes herdr
+# inject SGR mouse-wheel input into the pane to scroll the agent's own
+# transcript, harvest it, and scroll back (verified 0.9.1 against a pty-logged
+# Claude: 108 wheel events for one 200-line read, none for `--source visible`;
+# docs/herdr-backend.md "Passive pane reads"). `--source visible` also needs no
+# line count, so it never meets the empty-read quirk of a `--lines` value below
+# the viewport.
 fm_backend_herdr_capture() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} fetch out
+  local lines=${2:-200} out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
-  fetch=$lines
-  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
+  fm_backend_herdr_target_ready "$1" || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk '{ row[NR] = $0 } NF { last = NR } END { for (i = 1; i <= last; i++) print row[i] }' | tail -n "$lines"
+}
+
+# fm_backend_herdr_viewport_rows: the pane's visible row count from `pane get`
+# (.scroll.viewport_rows), or nonzero when it cannot be read.
+fm_backend_herdr_viewport_rows() {  # <session> <pane>
+  local rows
+  rows=$(fm_backend_herdr_cli "$1" pane get "$2" 2>/dev/null \
+    | jq -r '.result.pane.scroll.viewport_rows // empty' 2>/dev/null) || return 1
+  case "$rows" in ''|*[!0-9]*|0) return 1 ;; esac
+  printf '%s' "$rows"
+}
+
+# fm_backend_herdr_history_capture: the EXPLICIT deep read, reachable only
+# through fm_backend_history_capture (an operator's fm-peek --deep). A request that
+# fits the viewport is served by the passive routine capture above; only one
+# asking for more rows than the viewport holds reads `--source recent`, which
+# may scroll an idle alternate-screen agent and back while herdr harvests its
+# history. An unreadable viewport height keeps the read passive.
+fm_backend_herdr_history_capture() {  # <target> <lines>
+  local lines=${2:-200} rows out
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  fm_backend_herdr_target_ready "$1" || return 1
+  if ! rows=$(fm_backend_herdr_viewport_rows "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") \
+    || [ "$lines" -le "$rows" ]; then
+    fm_backend_herdr_capture "$1" "$lines"
+    return
+  fi
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$lines" 2>/dev/null) || return 1
   printf '%s' "$out" | tail -n "$lines"
 }
 
-# fm_backend_herdr_visible_capture: the visible viewport only. `--source
-# visible` is herdr's viewport-bounded read, so it needs none of the --lines
-# workaround above - the bound is the pane itself, and asking for a line count
-# is what triggers the empty-read bug.
+# fm_backend_herdr_visible_capture: the visible viewport only, untrimmed.
+# `--source visible` is herdr's viewport-bounded read: the bound is the pane
+# itself, and it never writes input into the pane.
 fm_backend_herdr_visible_capture() {  # <target>
   fm_backend_herdr_target_observable "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
@@ -3171,8 +3297,8 @@ fm_backend_herdr_visible_capture_ansi() {  # <target>
 # --- herdr composer capture and capability primitives -----------------------
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
-# ANSI viewport capture (`--source visible`, which needs no line count and so
-# no small-N workaround), the native `agent get` identity probe, and the
+# ANSI viewport capture (`--source visible`, which needs no line count), the
+# native `agent get` identity probe, and the
 # capability descriptor. Every shape - the bordered
 # box, the bare agent-glyph row, opencode's left-bar, and pi's
 # identity-gated separated pair (which this adapter pioneered) - now lives in
@@ -3210,8 +3336,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # composer as empty while it actually holds typed text. That blindness broke
 # fm-control exit (the typed /exit was judged unsent and cleared) and would
 # equally defeat this state read's pre-submit concat guard. The composer is
-# by definition inside the viewport, and `--source visible` needs none of the
-# small-N --lines workaround.
+# by definition inside the viewport.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -3611,6 +3736,8 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
 }
 
 fm_backend_herdr_kill() {  # <target>
+  # The caller's own pane is a refusal, not an already-gone endpoint.
+  fm_backend_herdr_self_guard "$1" || return 1
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
   local lock_path attempt=0 lock_held=0
